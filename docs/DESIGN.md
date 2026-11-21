@@ -96,6 +96,13 @@ shim 的职责：
 
 每条命令一个连接，并发天然隔离。
 
+实现上的取舍：
+
+- A 端监听 `127.0.0.1` 的 TCP 端口，因为 Windows 的 OpenSSH 对 unix socket 转发支持不可靠；B 端用 unix socket。连接必须带 token 认证，防止 A 上其他本地用户连进来。
+- A 端用 `bash -c` 执行命令，不加 `-l`，直接继承启动 rcc 时的用户环境。Windows 上用 Git Bash，并且会避开 `System32\bash.exe`（那是 WSL 的启动器）。
+- shim 只转发 Claude 为命令设置的变量（`CLAUDE*`、`__CLAUDE*`、`TERM` 等），B 的 PATH 和 HOME 不带过去。
+- shim 断开时（被 SIGKILL 杀掉，或者 ssh 断线），A 端会杀掉整个进程组；SIGINT、SIGTERM、SIGHUP 原样转发。
+
 ## 文件通道细节
 
 - 推荐的 sshfs 参数：`-o slave,reconnect,cache=yes,kernel_cache,attr_timeout=1,entry_timeout=1`。
@@ -131,9 +138,20 @@ shim 的职责：
 
 MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程碑。
 
+## 实测记录（B = Ubuntu 24.04 / Claude Code 2.1.330）
+
+- shim 收到的 argv 只有一项，就是完整命令串，格式和上面分析的一致（样本见 `internal/shim/rewrite_test.go`）。
+- cwd 文件路径在不需要引号时是裸路径，例如 `/tmp/claude-b614-cwd`。
+- Claude 只接受**工作目录范围内**的 cwd 变化，同路径挂载正好满足这个条件。
+- shell 快照的生成不经过 PREFIX，所以 shim 只会处理真正的命令。
+- 远程启动 claude 需要注意：非登录 ssh 会话的 PATH 里没有 `~/.local/bin`，M3 要用 `bash -lc` 启动或者写绝对路径。
+  另外以 root 身份运行时，Claude 不允许 `--dangerously-skip-permissions`。
+- 端到端已验证：真实 `ssh -R`（B 上的 unix socket → A 上的 TCP 端口）加 `claude -p`。
+  环境变量取的是 A 的，`cd` 在后续调用里保持，退出码正确透传。
+
 ## 里程碑
 
-- **M1 exec 通道**：`rcc serve`（A）加 `rcc shim`（B），手工设置 `ssh -R` 和 `CLAUDE_CODE_SHELL_PREFIX`，验证 Bash 工具在 A 上执行、cwd 追踪、退出码、Ctrl-C。
+- **M1 exec 通道** ✅：`rcc serve`（A）加 `rcc-shim`（B），手工设置 `ssh -R` 和 `CLAUDE_CODE_SHELL_PREFIX`，验证 Bash 工具在 A 上执行、cwd 追踪、退出码、Ctrl-C。
 - **M2 文件通道**：内置 SFTP 服务加 `sshfs -o slave` 同路径挂载，验证 Read/Edit/Write/Glob/Grep。
 - **M3 一键启动**：`rcc B [path]` 自动完成：上传 shim、建连接、挂载、起 PTY 跑 claude、退出时清理。
 - **M4 增强**：用户命名空间挂载、Grep/Glob 重定向到 A、断线重连、MCP 降级模式。
