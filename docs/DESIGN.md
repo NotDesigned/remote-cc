@@ -46,7 +46,26 @@ Claude 在命令里写的路径、cwd 在两台机器上都成立，所以不需
 - **exec 通道**：`ssh -R $SOCK_B:$SOCK_A` 把 B 上的一个 unix socket 反向转发到 A 上 rcc 监听的 socket（OpenSSH 6.7 起支持）。
   B 上的 shim 连这个 socket 就能让 A 执行命令。
 
-三者复用同一条 ssh 连接（ControlMaster，或者 Go 自己管理多个 channel）。
+在 Linux/macOS 上，几次 ssh 调用通过 ControlMaster 复用同一条连接，只认证一次。Windows 自带的 OpenSSH 不支持连接复用，所以会建立多条连接。
+
+### 一次会话的完整流程（`internal/session`）
+
+1. **probe**：一次 ssh 调用，收集 B 的 OS/arch、uid、HOME、sshfs/unshare/nsenter 是否存在、claude 路径（依次尝试 PATH、`$SHELL -lc`、`$SHELL -ic` 和几个常见位置）、已安装 shim 的 sha256。缺什么就给出明确报错。
+2. **prepare**：清理以前崩溃留下的 run 目录；在 umask 077 下创建 `~/.cache/rcc/run/<id>/`；通过 **stdin** 写入 token（不出现在任何命令行里）。如果 hash 不一致，再从 stdin 上传 shim。
+3. **agent**：A 上监听一个私有 unix socket（Windows 上是 `127.0.0.1` 的 TCP 端口），要求 token。
+4. **文件会话**：`ssh -T -R <run>/s:<agent>` 在 B 上运行 `sshfs -f -o slave`，stdio 接到 A 进程内的 SFTP 服务。收到 sshfs 的第一个字节，说明认证已完成、sshfs 已经启动。
+5. **交互会话**：`ssh -t` 运行 run 脚本。脚本先等挂载点和 socket 就绪，再设置 `RCC_SOCK`/`RCC_TOKEN`/`CLAUDE_CODE_SHELL_PREFIX`，进入项目目录后 `exec claude`。`rcc ... -- <args>` 后面的参数会原样传给 claude。
+6. **teardown**：claude 退出后关闭 sshfs 的 stdin，sshfs 随之退出，挂载消失。然后执行 cleanup 脚本：卸载、删除 rcc 自己创建的空目录、删除 run 目录和 socket，最后关闭 ControlMaster。
+   rcc 收到 SIGTERM/SIGHUP 时也会走同一条清理路径。
+
+B 端的脚本统一用 `sh -c 'eval "$(printf %s <base64> | base64 -d)"'` 发送，所以不管用户的登录 shell 是 bash、zsh 还是 fish 都能运行。
+
+### 挂载模式
+
+| 模式 | 条件 | 做法 |
+| --- | --- | --- |
+| `ns`（B 为 root 时默认） | root，且有 unshare/nsenter | sshfs 跑在 `unshare -m --propagation private` 创建的私有挂载命名空间里，claude 通过 `nsenter -t <sshfs pid> -m` 进入同一个命名空间。B 的全局文件系统视图完全不受影响，同一路径即使已经在 B 上存在也不会被覆盖，A 和 B 是同一台机器时也能用。 |
+| `global` | 非 root | 普通挂载。路径必须能创建，而且必须是空目录（rcc 不会覆盖非空目录）。 |
 
 ## 命令通道细节（已在 Claude Code 2.1.330 二进制里核实）
 
@@ -105,8 +124,10 @@ shim 的职责：
 
 ## 文件通道细节
 
-- 推荐的 sshfs 参数：`-o slave,reconnect,cache=yes,kernel_cache,attr_timeout=1,entry_timeout=1`。
-  缓存时间要短，因为 A 上的编辑器也会改文件。
+- 实际使用的 sshfs 参数：`-o slave,uid=<B uid>,gid=<B gid>,attr_timeout=1,entry_timeout=1,negative_timeout=1`。
+  用 uid/gid 把所有文件显示成 B 当前用户所有，因为 A 和 B 的 uid 不一定相同。缓存时间设得短，因为 A 上的编辑器也会改文件。
+- SFTP 服务基于 `pkg/sftp` 的 RequestServer 和自己写的 handler：支持 posix-rename、statvfs、hardlink；相对软链的目标原样保存；忽略 chown。
+  已测试的操作：读写、3MB 文件往返、`mv -f`、truncate、chmod、utimes、`df`，以及在挂载点里 `git init/commit` 后到 A 上 `git fsck`。
 - **挂到相同路径时的权限问题**：B 上不一定能创建 `/home/me/proj`。按优先级有三种做法：
   1. 路径本来就可写，或者用户有 sudo：直接 `mkdir -p`。
   2. **用户命名空间**：`unshare --user --map-root-user --mount` 后在私有挂载命名空间里挂载，claude 也在这个命名空间里跑。不需要 root，内核 ≥ 4.18 支持非特权 FUSE。
@@ -116,8 +137,8 @@ shim 的职责：
 
 ## 实现选型
 
-- **语言**：Go。A 端和 B 端用同一个静态二进制（`rcc` 和 `rcc shim` 两个子命令），交叉编译方便。
-  rcc 启动时检测 B 的 `uname -sm`，自动把对应架构的 shim 上传到 `~/.cache/rcc/`。
+- **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。
+  直接 `go build` 出来的版本不带内嵌 shim，这时只有 A 和 B 同为 linux 且架构相同才能用（会上传 rcc 自身）。
 - **ssh**：MVP 直接调用 A 上的系统 `ssh` 命令。这样 `~/.ssh/config`、ssh-agent、ProxyJump 都能用，几乎所有机器都自带。
   以后再考虑用 `golang.org/x/crypto/ssh` 去掉这个依赖。
 - **依赖**：A 上需要 ssh 客户端和 bash；B 上需要 claude、sshfs 和 FUSE（`/dev/fuse`）。
@@ -126,7 +147,7 @@ shim 的职责：
 
 - B 上的 Claude（以及 B 上的 root 或同用户的其它进程）对 A 拥有完整的执行和读写权限，这本来就是这个工具的目的。**B 必须是你信任的机器。**
 - B 上的 socket 放在 `$XDG_RUNTIME_DIR/rcc/` 或者权限为 0700 的目录里，文件权限 0600。会话结束时清理 socket、卸载挂载点。
-- SFTP 服务只暴露 `$P` 子树（chroot 式校验路径，拒绝越界的 `..` 和符号链接）。
+- SFTP 服务只暴露 `$P` 子树（按路径字面校验，拒绝 `..` 越界）。这只是防止误操作，不是安全边界，因为命令通道本来就能在 A 上执行任何命令。
 
 ## 备选方案（不作为主线）
 
@@ -152,6 +173,15 @@ MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程�
 ## 里程碑
 
 - **M1 exec 通道** ✅：`rcc serve`（A）加 `rcc-shim`（B），手工设置 `ssh -R` 和 `CLAUDE_CODE_SHELL_PREFIX`，验证 Bash 工具在 A 上执行、cwd 追踪、退出码、Ctrl-C。
-- **M2 文件通道**：内置 SFTP 服务加 `sshfs -o slave` 同路径挂载，验证 Read/Edit/Write/Glob/Grep。
-- **M3 一键启动**：`rcc B [path]` 自动完成：上传 shim、建连接、挂载、起 PTY 跑 claude、退出时清理。
-- **M4 增强**：用户命名空间挂载、Grep/Glob 重定向到 A、断线重连、MCP 降级模式。
+- **M2 文件通道** ✅：内置 SFTP 服务加 `sshfs -o slave` 同路径挂载，验证 Read/Edit/Write/Glob/Grep。
+- **M3 一键启动** ✅：`rcc B [path]` 自动完成：上传 shim、建连接、挂载、起 PTY 跑 claude、退出时清理。
+  已验证：rcc 跑在独立的挂载命名空间里，让 A 和 B 在同一路径下看到不同的目录，结果 Read 读到 A 的内容，Edit/Write 写到 A 的磁盘，Bash 在 A 上执行，B 的真实目录没有变化。
+  交互式 TUI 用伪终端驱动测试过，`/exit` 后退出码为 0；收到 SIGTERM 时也能完整清理。
+- **M4 增强**：非 root 时用用户命名空间挂载、Grep/Glob 重定向到 A、断线重连、MCP 降级模式、在真实的 Windows/macOS A 上验证。
+
+## 已知限制
+
+- Windows 和 macOS 作为 A 端目前只验证到交叉编译通过，还没在真机上跑过。
+- 指向项目目录外的软链在 B 上会解析到 B 自己的文件系统。
+- 大仓库里 Glob/Grep 走 sshfs 会比较慢（见 M4）。
+- claude 在 B 上用的是非登录 ssh 会话的环境。认证一般靠 `~/.claude/.credentials.json`，没有影响；但如果 API key 只写在 `.bashrc` 里，claude 就读不到。

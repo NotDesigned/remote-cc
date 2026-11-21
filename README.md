@@ -14,43 +14,32 @@ A (本机，运行 rcc)  ──ssh──►  B (远程，装有 claude)
 
 详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+## 用法
+
+```sh
+rcc user@B                     # 在当前目录启动 Claude Code
+rcc user@B ~/proj              # 指定项目目录
+rcc -p 2222 -i ~/.ssh/key user@B . -- --resume   # ssh 参数，-- 后面的参数传给 claude
+rcc -v ...                     # 显示过程
+```
+
+A 上执行的命令会记录到 `~/.cache/rcc/last.log`（Linux；其它平台在对应的用户缓存目录下）。
+
 ## 状态
 
-- [x] M1 命令通道（`rcc serve` / `rcc-shim`），已和真实的 Claude Code 端到端验证
-- [ ] M2 文件通道（内置 SFTP 加 `sshfs -o slave`）
-- [ ] M3 一键启动 `rcc user@B`
-- [ ] M4 增强
+- [x] M1 命令通道（`CLAUDE_CODE_SHELL_PREFIX` → `rcc-shim` → 反向 socket → A）
+- [x] M2 文件通道（内置 SFTP 加 `sshfs -o slave`，挂到同一路径）
+- [x] M3 一键启动，退出或收到信号时自动清理
+- [ ] M4 增强（见 docs/DESIGN.md）
 
-## 手动试用 M1
-
-```sh
-go build -o rcc ./cmd/rcc            # A 和 B 各一份（可以交叉编译）
-ln -s rcc rcc-shim                   # B 上
-
-# A：
-rcc serve --listen 127.0.0.1:7788 --token SECRET
-ssh -R /tmp/rcc.sock:127.0.0.1:7788 user@B
-
-# B（在上面那个 ssh 会话里，项目目录要和 A 上路径相同，M2 之前需要自己同步）：
-cd /same/path/as/on/A
-RCC_SOCK=/tmp/rcc.sock RCC_TOKEN=SECRET CLAUDE_CODE_SHELL_PREFIX=$PWD/rcc-shim claude
-```
-
-## 开发
+## 构建
 
 ```sh
-go test ./...                                   # 包含 shim↔agent 端到端测试
-GOOS=windows go build ./cmd/rcc                 # 交叉编译检查
-```
-
-## 预期用法
-
-```sh
-rcc user@B            # 在当前目录启动
-rcc user@B ~/proj     # 指定项目目录
+./scripts/build.sh        # 输出 dist/rcc-{linux,darwin,windows}-{amd64,arm64}，内嵌 B 端 shim
+go test ./...             # 包括真实 sshfs 挂载测试（需要 root、sshfs 和 /dev/fuse，否则跳过）
 ```
 
 ## 依赖
 
-- A：`ssh` 客户端、`bash`
-- B：`claude`、`sshfs`、FUSE
+- A：`ssh` 客户端、`bash`（Windows 上是 Git Bash）
+- B：Linux、`claude`、`sshfs`、FUSE；用 root 时还需要 `unshare`/`nsenter`（util-linux）
