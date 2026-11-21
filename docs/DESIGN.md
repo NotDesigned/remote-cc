@@ -171,6 +171,28 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 - B 上的 socket 放在 `$XDG_RUNTIME_DIR/rcc/` 或者权限为 0700 的目录里，文件权限 0600。会话结束时清理 socket、卸载挂载点。
 - SFTP 服务只暴露 `$P` 子树（按路径字面校验，拒绝 `..` 越界）。这只是防止误操作，不是安全边界，因为命令通道本来就能在 A 上执行任何命令。
 
+## 与 cc-desk-tunnel 的对比
+
+[sun168567/cc-desk-tunnel](https://github.com/sun168567/cc-desk-tunnel) 的目标相同：Claude Code 跑在 Linux 上，命令在 Windows 本机执行。（以下内容来自 2026-11-20 的 e5386a8 版本。）
+
+| | remote-cc | cc-desk-tunnel |
+| --- | --- | --- |
+| 让工具作用到本机的方式 | **透明替换**：Bash 走 `CLAUDE_CODE_SHELL_PREFIX`；文件通过 sshfs 挂到同一路径，原生 Read/Edit/Grep 直接可用 | **提示词**：原生工具仍然作用在 Linux 上，系统提示词告诉 Claude 用 `ssh device-pwsh <<'EOF' … EOF` 操作 Windows；PATH 最前面放一个带 `-F` 的 ssh 包装 |
+| B 端要求 | sshfs + FUSE（root 时用私有挂载命名空间） | Docker 容器，不需要 FUSE |
+| 连接 | A 通过系统 ssh 连接 B（需要 B 上的 ssh 账号） | 客户端主动建 WSS 到服务端（单端口，证书指纹固定），WSS 里每条通道承载一条真实的 SSH 连接，接到 Windows 上随包带的回环 sshd |
+| 界面 | 原版 Claude Code TUI，显示在 A 的终端 | Electron 图形客户端（基于 Agent SDK）+ 终端客户端 ccdt（node-pty） |
+| 断线 | 会话结束 | CLI 在服务端继续运行；设备离线时新命令在入口处最多等 1 分钟；有宽限期，支持换电脑继续 |
+| 历史隔离 | 每台 A 一个 profile，用 bind mount 替换 `projects/` | 服务端按设备加项目分配固定的工作目录 |
+
+**借鉴并已实现**：命令子进程与用户的终端/控制台隔离。
+- Unix 上用 `Setsid`，命令没有控制终端。
+- Windows 上用 `CREATE_NO_WINDOW`，命令有自己的隐藏控制台，并且先执行 `chcp.com 65001`，避免中文系统上按 GBK 输出导致乱码。cc-desk-tunnel 的做法是 `chcp.com 65001 >nul & bash -s`，子进程同样不带窗口。
+
+**以后可以借鉴的**：
+- 断线后保持会话：B 上的 claude 放进一个能脱离连接继续运行的 PTY，shim 在 socket 不在时等待一段时间。难点是 slave 模式的 sshfs 会随连接一起断掉。
+- Windows 上用 Job Object，保证 rcc 退出时所有子进程一起结束。
+- 不能用 FUSE 时，可以退回它这种提示词方式。
+
 ## 备选方案（不作为主线）
 
 | 方案 | 优点 | 缺点 |
@@ -202,7 +224,7 @@ MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程�
 - **M3 一键启动** ✅：`rcc B [path]` 自动完成：上传 shim、建连接、挂载、起 PTY 跑 claude、退出时清理。
   已验证：rcc 跑在独立的挂载命名空间里，让 A 和 B 在同一路径下看到不同的目录，结果 Read 读到 A 的内容，Edit/Write 写到 A 的磁盘，Bash 在 A 上执行，B 的真实目录没有变化。
   交互式 TUI 用伪终端驱动测试过，`/exit` 后退出码为 0；收到 SIGTERM 时也能完整清理。
-- **M4 增强**：非 root 时用用户命名空间挂载、Grep/Glob 重定向到 A、断线重连、MCP 降级模式、在真实的 Windows/macOS A 上验证。
+- **M4 增强**：断线保持会话（参考 cc-desk-tunnel）、非 root 时用用户命名空间挂载、Grep/Glob 重定向到 A、断线重连、MCP 降级模式、在真实的 Windows/macOS A 上验证。
 
 ## 已知限制
 

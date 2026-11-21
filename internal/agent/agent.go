@@ -108,7 +108,7 @@ func (a *Agent) handle(nc net.Conn) {
 }
 
 func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, error) {
-	cmd := exec.Command(a.shell, "-c", st.Cmd)
+	cmd := exec.Command(a.shell, "-c", wrapScript(st.Cmd))
 	cmd.Dir = dir
 	cmd.Env = mergeEnv(os.Environ(), st.Env)
 	cmd.Stdout = proto.ChunkWriter{C: c, T: proto.TStdout}

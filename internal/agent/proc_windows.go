@@ -11,10 +11,23 @@ import (
 	"remote-cc/internal/proto"
 )
 
-const createNewProcessGroup = 0x00000200
+const (
+	createNewProcessGroup = 0x00000200
+	createNoWindow        = 0x08000000
+)
 
+// setProcessGroup gives the command its own hidden console instead of the
+// user's, which is busy showing Claude's TUI through ssh: console programs
+// can neither read keystrokes from it nor draw over it, and no window flashes.
 func setProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewProcessGroup}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewProcessGroup | createNoWindow}
+}
+
+// wrapScript switches the hidden console to UTF-8 first, so Windows programs
+// (cmd, ping, …) do not print in the ANSI code page (e.g. GBK on Chinese
+// Windows) and garble what Claude reads.
+func wrapScript(s string) string {
+	return "chcp.com 65001 >/dev/null 2>&1; " + s
 }
 
 // Windows has no POSIX signals; any signal tears down the whole process tree.

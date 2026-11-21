@@ -89,6 +89,18 @@ func TestExitCodeAndStdin(t *testing.T) {
 	}
 }
 
+// Commands must not inherit the user's terminal (it shows Claude's TUI):
+// each runs as a session leader with no controlling tty.
+func TestNoControllingTerminal(t *testing.T) {
+	shimPath, sock := setup(t)
+	cmd := claudeStyle(shimPath, `[ "$(ps -o sid= -p $$ | tr -d ' ')" = "$$" ] && echo leader; (exec 3</dev/tty) 2>/dev/null || echo no-tty`)
+	cmd.Env = append(os.Environ(), "RCC_SOCK="+sock, "RCC_TOKEN=tok")
+	out, err := cmd.Output()
+	if err != nil || string(out) != "leader\nno-tty\n" {
+		t.Fatalf("err=%v out=%q", err, out)
+	}
+}
+
 func TestBadToken(t *testing.T) {
 	shimPath, sock := setup(t)
 	cmd := claudeStyle(shimPath, "true")

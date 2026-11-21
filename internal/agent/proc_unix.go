@@ -11,9 +11,16 @@ import (
 	"remote-cc/internal/proto"
 )
 
+// setProcessGroup starts the command in a new session: it gets its own
+// process group (for signalling the whole tree) and no controlling terminal.
+// The user's terminal is in raw mode, owned by the interactive ssh showing
+// Claude's TUI; a command opening /dev/tty (sudo/ssh/gpg prompts) must fail
+// instead of stealing keystrokes or drawing over the TUI.
 func setProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
+
+func wrapScript(s string) string { return s }
 
 var signals = map[string]syscall.Signal{
 	"INT":  syscall.SIGINT,
