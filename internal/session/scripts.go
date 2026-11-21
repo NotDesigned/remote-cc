@@ -134,6 +134,8 @@ while :; do
   sleep 0.1
 done
 export RCC_SOCK="unix:$SOCK" RCC_TOKEN="$(cat "$RUN/token")" CLAUDE_CODE_SHELL_PREFIX="$CACHE/rcc-shim"
+# As root, Claude Code refuses --dangerously-skip-permissions unless IS_SANDBOX=1.
+[ "$SANDBOX" = 1 ] && export IS_SANDBOX=1
 if [ "$MODE" = ns ]; then
   exec nsenter -t "$pid" -m -- sh -c 'cd "$1" && shift && exec "$@"' sh "$R" "$CLAUDE" "$@"
 fi

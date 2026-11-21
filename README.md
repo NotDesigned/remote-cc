@@ -22,6 +22,7 @@ rcc user@B ~/proj              # 指定项目目录
 rcc -p 2222 -i ~/.ssh/key user@B . -- --resume   # ssh 参数，-- 后面的参数传给 claude
 rcc user@B -- --continue       # 继续这个目录上次的对话（--resume 选择历史对话）
 rcc --profile work user@B      # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
+rcc user@B -- --dangerously-skip-permissions   # B 是 root 时也能用（rcc 会设置 IS_SANDBOX=1，--no-is-sandbox 可关闭）
 rcc -v ...                     # 显示过程
 ```
 

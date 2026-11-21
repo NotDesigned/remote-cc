@@ -59,6 +59,9 @@ options:
   --mode MODE      auto (default) | ns (private mount namespace, needs root on
                    host) | global (normal mount; dir path must be creatable)
   --claude PATH    path of claude on host (default: auto-detect)
+  --no-is-sandbox  do not set IS_SANDBOX=1 for claude when the remote user is
+                   root (it is set by default so --dangerously-skip-permissions
+                   works there)
   --profile NAME   conversation history store on host (default: one per local
                    machine, auto-named; "none" = host's shared ~/.claude)
   ssh options passed through: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER
@@ -94,6 +97,8 @@ func runSession(args []string) int {
 			cfg.Mode = val()
 		case a == "--claude":
 			cfg.ClaudePath = val()
+		case a == "--no-is-sandbox":
+			cfg.NoIsSandbox = true
 		case a == "--profile":
 			cfg.Profile = val()
 		case a == "-p" || a == "-i" || a == "-J" || a == "-o" || a == "-F" || a == "-l":

@@ -46,6 +46,9 @@ type Config struct {
 	// Profile selects the conversation history store on B. "" means this A
 	// machine's own profile; "none" means B's regular ~/.claude (shared).
 	Profile string
+	// NoIsSandbox disables exporting IS_SANDBOX=1 for claude when B's user
+	// is root (needed there for --dangerously-skip-permissions).
+	NoIsSandbox bool
 	SSH         string // ssh binary, default "ssh"
 }
 
@@ -333,7 +336,11 @@ func (s *session) start() (int, error) {
 	}
 
 	// --- Claude Code, interactive
-	runCmd := s.sshCmd(true, nil, common+vars("CLAUDE", s.facts["claude"])+setArgs(s.cfg.ClaudeArgs)+runScript)
+	sandbox := "0"
+	if s.facts["uid"] == "0" && !s.cfg.NoIsSandbox {
+		sandbox = "1"
+	}
+	runCmd := s.sshCmd(true, nil, common+vars("CLAUDE", s.facts["claude"], "SANDBOX", sandbox)+setArgs(s.cfg.ClaudeArgs)+runScript)
 	runCmd.Stdin, runCmd.Stdout, runCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The tty is in raw mode while ssh runs; keep stray signals from killing
 	// rcc before it can clean up.

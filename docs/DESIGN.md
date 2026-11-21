@@ -187,8 +187,11 @@ MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程�
 - cwd 文件路径在不需要引号时是裸路径，例如 `/tmp/claude-b614-cwd`。
 - Claude 只接受**工作目录范围内**的 cwd 变化，同路径挂载正好满足这个条件。
 - shell 快照的生成不经过 PREFIX，所以 shim 只会处理真正的命令。
-- 远程启动 claude 需要注意：非登录 ssh 会话的 PATH 里没有 `~/.local/bin`，M3 要用 `bash -lc` 启动或者写绝对路径。
-  另外以 root 身份运行时，Claude 不允许 `--dangerously-skip-permissions`。
+- 远程启动 claude 需要注意：非登录 ssh 会话的 PATH 里没有 `~/.local/bin`，所以 probe 会主动查找 claude 的绝对路径。
+  另外以 root 身份运行时，Claude 不允许 `--dangerously-skip-permissions`，除非设置了 `IS_SANDBOX=1`。
+  因此 B 是 root 时，rcc 默认给 claude 设置 `IS_SANDBOX=1`，`--no-is-sandbox` 可以关闭。
+  这个变量在 Claude Code 里还有其它小影响：遇到 529 过载会一直重试、会话来源标记为 `is_sandbox`、少数功能被关闭。
+  它不会经 shim 转发到 A。已实测：默认可以用 skip-permissions，命令在 A 上执行；加上 `--no-is-sandbox` 后被拒绝。
 - 端到端已验证：真实 `ssh -R`（B 上的 unix socket → A 上的 TCP 端口）加 `claude -p`。
   环境变量取的是 A 的，`cd` 在后续调用里保持，退出码正确透传。
 
