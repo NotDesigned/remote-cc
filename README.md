@@ -20,8 +20,12 @@ A (本机，运行 rcc)  ──ssh──►  B (远程，装有 claude)
 rcc user@B                     # 在当前目录启动 Claude Code
 rcc user@B ~/proj              # 指定项目目录
 rcc -p 2222 -i ~/.ssh/key user@B . -- --resume   # ssh 参数，-- 后面的参数传给 claude
+rcc user@B -- --continue       # 继续这个目录上次的对话（--resume 选择历史对话）
+rcc --profile work user@B      # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
 rcc -v ...                     # 显示过程
 ```
+
+对话历史保存在 B 上，按本机隔离：两台机器即使项目路径相同，也不会看到对方的对话（需要 B 用 root 运行）。
 
 A 上执行的命令会记录到 `~/.cache/rcc/last.log`（Linux；其它平台在对应的用户缓存目录下）。
 

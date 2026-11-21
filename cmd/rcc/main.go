@@ -59,6 +59,8 @@ options:
   --mode MODE      auto (default) | ns (private mount namespace, needs root on
                    host) | global (normal mount; dir path must be creatable)
   --claude PATH    path of claude on host (default: auto-detect)
+  --profile NAME   conversation history store on host (default: one per local
+                   machine, auto-named; "none" = host's shared ~/.claude)
   ssh options passed through: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER
                               -4 -6 -A -C -q
 
@@ -92,6 +94,8 @@ func runSession(args []string) int {
 			cfg.Mode = val()
 		case a == "--claude":
 			cfg.ClaudePath = val()
+		case a == "--profile":
+			cfg.Profile = val()
 		case a == "-p" || a == "-i" || a == "-J" || a == "-o" || a == "-F" || a == "-l":
 			cfg.SSHArgs = append(cfg.SSHArgs, a, val())
 		case a == "-4" || a == "-6" || a == "-A" || a == "-C" || a == "-q":

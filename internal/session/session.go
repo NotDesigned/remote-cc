@@ -43,6 +43,9 @@ type Config struct {
 	ClaudePath  string   // override auto-detected claude path on B
 	Mode        string   // auto | ns | global
 	Verbose     bool
+	// Profile selects the conversation history store on B. "" means this A
+	// machine's own profile; "none" means B's regular ~/.claude (shared).
+	Profile string
 	SSH         string // ssh binary, default "ssh"
 }
 
@@ -60,6 +63,7 @@ type session struct {
 	run   string // $HOME/.cache/rcc/run/<id> on B
 	cache string
 	sock  string // command socket on B
+	prof  string // per-A history dir on B, "" = shared
 
 	mu      sync.Mutex
 	stopped bool        // SIGTERM/SIGHUP received
@@ -152,7 +156,7 @@ func (s *session) closeMaster() {
 	c.Run()
 }
 
-func (s *session) probe() error {
+func (s *session) probe() (err error) {
 	c := s.sshCmd(false, nil, probeScript)
 	c.Stdin = nil
 	c.Stderr = os.Stderr // auth prompts / host key questions go to the user
@@ -208,6 +212,25 @@ func (s *session) probe() error {
 		return fmt.Errorf("unknown mode %q", s.cfg.Mode)
 	}
 
+	profile := s.cfg.Profile
+	if profile == "" {
+		if profile, err = MachineProfile(); err != nil {
+			return err
+		}
+	}
+	if profile != "none" {
+		if !validProfile(profile) {
+			return fmt.Errorf("invalid profile name %q (use letters, digits, '.', '_', '-')", profile)
+		}
+		if s.mode == "ns" {
+			s.prof = f["home"] + "/.local/share/rcc/profiles/" + profile
+		} else {
+			fmt.Fprintf(os.Stderr, "rcc: warning: per-machine conversation history needs root on the remote machine (mount namespace); "+
+				"this session uses the remote's shared ~/.claude history\n")
+		}
+	}
+	s.logf("history profile: %s", map[bool]string{true: s.prof, false: "shared (" + f["cfgdir"] + ")"}[s.prof != ""])
+
 	s.cache = f["home"] + "/.cache/rcc"
 	s.run = s.cache + "/run/" + s.id
 	s.sock = s.run + "/s"
@@ -255,7 +278,8 @@ func (s *session) start() (int, error) {
 		return 1, fmt.Errorf("preparing remote machine: %w", err)
 	}
 
-	common := vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote, "MODE", s.mode)
+	common := vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote, "MODE", s.mode,
+		"PROF", s.prof, "CFG", s.facts["cfgdir"])
 	defer func() {
 		c := s.sshCmd(false, nil, common+cleanupScript)
 		c.Run()

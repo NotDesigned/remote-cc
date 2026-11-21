@@ -35,6 +35,7 @@ echo "os=$(uname -s)"
 echo "arch=$(uname -m)"
 echo "uid=$(id -u)"
 echo "home=$HOME"
+echo "cfgdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 for b in sshfs unshare nsenter mountpoint fusermount3 fusermount base64 sha256sum; do
   p=$(command -v $b 2>/dev/null) && echo "bin_$b=$p"
 done
@@ -86,7 +87,21 @@ while [ ! -e "$(dirname "$first")" ]; do first=$(dirname "$first"); done
 [ -e "$R" ] || printf '%s\n' "$first" > "$RUN/created"
 if [ "$MODE" = ns ]; then
   echo $$ > "$RUN/pid"
-  exec unshare -m --propagation private sh -c 'mkdir -p "$1" && exec sshfs -f -o "$2" ":$1" "$1"' sh "$R" "$opts"
+  # Inside the namespace, also swap Claude Code's conversation store
+  # (projects/) and prompt history for this A machine's profile, so that
+  # different A machines with the same project path don't share history.
+  exec unshare -m --propagation private sh -c '
+    set -e
+    mkdir -p "$1"
+    if [ -n "$3" ]; then
+      umask 077
+      mkdir -p "$3/projects" "$4/projects"
+      [ -e "$3/history.jsonl" ] || : > "$3/history.jsonl"
+      [ -e "$4/history.jsonl" ] || : > "$4/history.jsonl"
+      mount --bind "$3/projects" "$4/projects"
+      mount --bind "$3/history.jsonl" "$4/history.jsonl"
+    fi
+    exec sshfs -f -o "$2" ":$1" "$1"' sh "$R" "$opts" "$PROF" "$CFG"
 fi
 mkdir -p "$R"
 if [ -n "$(ls -A "$R" 2>/dev/null)" ]; then

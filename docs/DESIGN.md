@@ -135,6 +135,28 @@ shim 的职责：
 - **性能**：Glob/Grep 在 sshfs 上遍历大仓库会慢。后续可以加一个 PreToolUse hook，把 Grep/Glob 重定向成经 exec 通道在 A 上跑 `rg`；
   或者直接禁用这两个工具，让 Claude 用 Bash 里的 `rg`，这样就在 A 上本地执行了。
 
+## 对话历史按 A 隔离
+
+Claude Code 在 `~/.claude/projects/<编码后的路径>/` 下按项目路径保存对话（`--resume`/`--continue` 读的就是这里），
+另外在 `~/.claude/history.jsonl` 里追加保存输入历史（上箭头调出的内容）。
+因为挂载用的是同一路径，两台 A 上路径相同的项目，在 B 上会被当成同一个项目。
+
+解决办法：每台 A 有一个 profile，默认名字是 `<hostname>-<随机8位hex>`，第一次运行时生成，保存在 A 的 `<UserConfigDir>/rcc/profile`；也可以用 `--profile NAME` 手动指定。
+在 ns 模式下，mount 脚本在私有命名空间里多做两次 bind mount：
+
+```
+~/.local/share/rcc/profiles/<profile>/projects       → ~/.claude/projects
+~/.local/share/rcc/profiles/<profile>/history.jsonl  → ~/.claude/history.jsonl
+```
+
+只有这个会话里的 claude 能看到替换后的目录。登录凭据、settings、插件、skills 照常共用，所以不需要每台 A 分别登录。
+B 上直接运行的 claude 看到的还是原来的目录。`--profile none` 表示不隔离，直接用 B 原本的历史。
+
+已实测：用两个 profile、相同路径跑三次。A1 让 Claude 记住一个暗号；A2 执行 `--continue` 时没有接上 A1 的对话；A1 执行 `--continue` 正确答出了暗号。B 原本的 `projects/` 没有新增内容。
+
+还没隔离的部分：`~/.claude.json` 里按项目路径记录的状态（是否已信任该目录、项目级允许的工具等）仍然共用。
+global 模式（B 非 root）没有私有命名空间，无法做 bind mount，会打印警告，然后使用共享的历史。
+
 ## 实现选型
 
 - **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。
@@ -184,4 +206,5 @@ MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程�
 - Windows 和 macOS 作为 A 端目前只验证到交叉编译通过，还没在真机上跑过。
 - 指向项目目录外的软链在 B 上会解析到 B 自己的文件系统。
 - 大仓库里 Glob/Grep 走 sshfs 会比较慢（见 M4）。
+- B 非 root（global 模式）时，对话历史不能按 A 隔离。
 - claude 在 B 上用的是非登录 ssh 会话的环境。认证一般靠 `~/.claude/.credentials.json`，没有影响；但如果 API key 只写在 `.bashrc` 里，claude 就读不到。
