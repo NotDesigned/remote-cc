@@ -32,7 +32,7 @@ rcc user@B -- --continue       # 继续这个目录上次的对话（--resume �
 rcc --profile work user@B      # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
 rcc user@B -- --dangerously-skip-permissions   # B 是 root 时也能用（rcc 会设置 IS_SANDBOX=1，--no-is-sandbox 可关闭）
 rcc --account work user@B      # 使用 B 上名为 work 的账号（或者设置 RCC_ACCOUNT=work）
-rcc -v ...                     # 显示过程
+rcc -v ...                     # 显示过程；-vv / -vvv / -vvvv 同时让 ssh 输出调试信息（相当于 ssh -v / -vv / -vvv）
 ```
 
 对话历史保存在 B 上，按本机隔离：两台机器即使项目路径相同，也不会看到对方的对话（需要 B 用 root 运行）。

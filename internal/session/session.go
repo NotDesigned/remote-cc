@@ -436,6 +436,7 @@ func (s *session) openLog() *os.File {
 		dir = filepath.Join(dir, "rcc")
 		if os.MkdirAll(dir, 0o700) == nil {
 			if f, err := os.Create(filepath.Join(dir, "last.log")); err == nil {
+				s.logf("log file: %s", f.Name())
 				return f
 			}
 		}

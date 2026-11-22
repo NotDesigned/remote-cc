@@ -99,7 +99,9 @@ const usageTemplate = `usage:
   this machine. Commands run here; files are served from here.
 
 options:
-  -v               verbose
+  -v               verbose; -vv, -vvv, -vvvv also make ssh verbose (like ssh
+                   -v/-vv/-vvv): the first connections print to the terminal,
+                   the file channel's ssh output goes to the log file
   --mode MODE      auto (default) | ns (private mount namespace, needs root on
                    host) | global (normal mount; dir path must be creatable)
   --claude PATH    path of claude on host (default: auto-detect)
@@ -175,8 +177,16 @@ func parseArgs(args []string) (session.Config, []string, bool) {
 		case a == "--":
 			cfg.ClaudeArgs = args[i+1:]
 			i = len(args)
-		case a == "-v":
+		case len(a) >= 2 && strings.Trim(a[1:], "v") == "" && a[0] == '-' && a != "-":
+			// -v: rcc verbose; each extra v raises ssh's log level
+			// (-vv = ssh -v, -vvv = ssh -vv, -vvvv = ssh -vvv).
 			cfg.Verbose = true
+			if n := len(a) - 2; n > 0 {
+				if n > 3 {
+					n = 3
+				}
+				cfg.SSHArgs = append(cfg.SSHArgs, "-o", fmt.Sprintf("LogLevel=DEBUG%d", n))
+			}
 		case a == "--mode":
 			cfg.Mode = val()
 		case a == "--claude":
