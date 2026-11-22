@@ -1,0 +1,28 @@
+# docker compose up -d     (settings in .env next to this file; `rcc setup-server` writes both)
+services:
+  remote-cc:
+    image: ${RCC_IMAGE:-ghcr.io/notdesigned/remote-cc-server:latest}
+    build:            # only used by `docker compose build` / `up --build`
+      context: .
+      args:
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-stable}
+    container_name: remote-cc
+    hostname: remote-cc
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${RCC_BIND:-0.0.0.0}:${RCC_PORT:-2222}:22"
+    # sshfs (FUSE) needs the device, CAP_SYS_ADMIN, and Docker's default
+    # AppArmor profile lifted (it denies mount). Not --privileged: no host
+    # devices or host filesystem are exposed.
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      AUTHORIZED_KEYS: ${AUTHORIZED_KEYS:-}
+    volumes:
+      - ${RCC_DATA:-./data}/root:/root
+      - ${RCC_DATA:-./data}/ssh:/etc/ssh/keys

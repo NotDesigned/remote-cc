@@ -473,6 +473,8 @@ type rwc struct {
 func (x rwc) Write(p []byte) (int, error) { return x.w.Write(p) }
 func (x rwc) Close() error                { return x.w.Close() }
 
+func isWindows() bool { return runtime.GOOS == "windows" }
+
 func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)

@@ -16,7 +16,10 @@ A (本机，运行 rcc)  ──ssh──►  B (远程，装有 claude)
 
 ## 安装
 
-从 [Releases](https://github.com/NotDesigned/remote-cc/releases/latest) 下载对应平台的二进制（`rcc-<os>-<arch>`），放进 PATH 并命名为 `rcc` 或 `remote-cc`。
+**服务端（B）**：推荐用 Docker 部署，在本机执行 `rcc setup-server root@B` 即可，详见 [deploy/README.md](deploy/README.md)。
+也可以不用 Docker，直接在 B 上装 `claude` 和 `sshfs`。
+
+**本机（A）**：从 [Releases](https://github.com/NotDesigned/remote-cc/releases/latest) 下载对应平台的二进制（`rcc-<os>-<arch>`），放进 PATH 并命名为 `rcc` 或 `remote-cc`。
 B 端不需要单独安装：rcc 每次连接时都会自动上传匹配架构的 `rcc-shim`。
 
 ## 用法
@@ -66,7 +69,7 @@ go test ./...             # 包括真实 sshfs 挂载测试（需要 root、sshf
 ## 依赖
 
 - A：`ssh` 客户端、`bash`（Windows 上是 Git Bash）
-- B：Linux、`claude`、`sshfs`、FUSE；用 root 时还需要 `unshare`/`nsenter`（util-linux）
+- B：用 Docker 部署时，只需要 Docker 和 `/dev/fuse`；直接部署时需要 Linux、`claude`、`sshfs`、FUSE，以 root 运行时还需要 `unshare`/`nsenter`（util-linux）
 
 ## 许可证
 

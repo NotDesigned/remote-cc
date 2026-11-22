@@ -1,0 +1,32 @@
+# remote-cc: hardened sshd for an internet-facing port.
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+HostKey /etc/ssh/keys/ssh_host_ecdsa_key
+HostKey /etc/ssh/keys/ssh_host_rsa_key
+
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+MaxAuthTries 3
+LoginGraceTime 20
+MaxStartups 10:30:60
+
+# rcc needs exactly one kind of forwarding: a remote unix socket (-R).
+# OpenSSH quirk: "AllowTcpForwarding no" also refuses remote *unix socket*
+# forwards (both share the remote-forward permission check). So allow remote
+# forwarding and deny every TCP listen with "PermitListen none"; socket paths
+# are not subject to that list. Local (-L) forwarding stays off.
+AllowStreamLocalForwarding remote
+StreamLocalBindUnlink yes
+AllowTcpForwarding remote
+PermitListen none
+GatewayPorts no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+
+ClientAliveInterval 15
+ClientAliveCountMax 4
+PrintMotd no

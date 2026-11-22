@@ -188,6 +188,25 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 - 已实测：新账号目录的建立和链接、令牌的保存与清除（权限 600）、accounts 列表、会话里 `CLAUDE_CONFIG_DIR` 和令牌的传递以及历史 profile（用一个打印环境的假 claude 验证）、`login` 能在 A 的终端显示 `https://claude.ai/oauth/authorize` 并等待粘贴授权码。
   真实账号的授权和使用没有测，因为需要在浏览器里完成。`auth status` 对令牌只检查是否配置，不检查是否有效（假令牌也会显示 loggedIn），这一点和 cc-desk-tunnel 文档里的说明一致。
 
+## 服务端容器化
+
+问题：Claude 以 root 身份直接运行在 B 上，它在项目外的 Read/Write、WebFetch、MCP 都作用于宿主机。改用专用用户也不行：这台 Ubuntu 24.04 设置了 `apparmor_restrict_unprivileged_userns=1`，普通用户不能创建挂载命名空间，同路径挂载和历史隔离都需要额外写一个 root 辅助程序。
+所以服务端改成 Docker 容器（`deploy/`）：容器内是 root，现有的 ns 模式、历史隔离、多账号都原样可用；宿主机文件对 Claude 不可见。
+
+- **镜像**：debian-slim，装 openssh-server、sshfs、fuse3、procps，外加固定版本的 Claude Code 原生二进制（多阶段构建，只复制二进制）。
+  用 managed settings 设置 `DISABLE_AUTOUPDATER=1`，任何账号都生效。镜像由 GitHub Actions 构建 amd64 和 arm64 两个版本并推送到 GHCR。
+- **容器权限**：`/dev/fuse` + `CAP_SYS_ADMIN` + `apparmor:unconfined`（Docker 默认的 AppArmor 规则禁止 mount），不加 `--privileged`。
+  数据卷 `<data>/root` 挂到容器的 `/root`，保存 Claude 登录、历史、rcc 状态；`<data>/ssh` 保存 sshd 主机密钥，重建容器后指纹不变。
+- **sshd**：只允许密钥登录。有一个 OpenSSH 的特殊行为：`AllowTcpForwarding no` 会连 unix socket 的反向转发一起拒绝，因为两者共用远程转发的权限检查。
+  所以改用 `AllowTcpForwarding remote` + `PermitListen none`：unix socket 路径不受 PermitListen 限制，TCP 监听全部被拒绝；local 转发本来就不在 `remote` 允许范围内。
+  实测：`-R` unix socket 可用，`-R` TCP 端口被拒绝，`-L` 在实际使用时被拒绝（administratively prohibited）。
+- **`rcc setup-server`**：一条命令完成部署和更新。compose.yml 通过 go:embed 打包在 rcc 里；公钥直接写进数据卷（不放 .env）。
+  容器的主机公钥通过已经验证过的 root ssh 连接取得，并写进本机 `known_hosts`，以 `[host]:port` 为键。`--migrate-history` 会复制宿主机上以前的 rcc 历史 profile。
+- **已实测**（A 和 B 是同一台机器，用本地构建的镜像，容器只监听 127.0.0.1）：setup-server 部署完成、known_hosts 写入，并在开启主机密钥校验的情况下连接成功。
+  在容器里通过挂载读写了 A 的文件，通过 shim 在 A 上执行了命令，迁移的历史 profile 也挂上了；会话结束后容器里没有残留。
+  容器里的 claude 还没登录，所以会话这部分用一个假 claude 测试；真实 claude 只测了 `--version` 和 `auth status`。
+- **磁盘**：在 B 上本地构建会临时产生约 2GB 的构建缓存，开发时一度把这台机器的磁盘写满了。所以镜像改由 CI 构建，服务器只拉取。
+
 ## 实现选型
 
 - **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。

@@ -11,8 +11,10 @@ import (
 // (bash, zsh, fish, …) the remote user has.
 
 // remoteCommand wraps a POSIX sh script so any login shell can run it.
+func base64Std(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
 func remoteCommand(script string) string {
-	b64 := base64.StdEncoding.EncodeToString([]byte(script))
+	b64 := base64Std(script)
 	return `sh -c 'eval "$(printf %s ` + b64 + ` | base64 -d)"'`
 }
 

@@ -1,0 +1,8 @@
+// Package deploy carries the server deployment files so that
+// `rcc setup-server` can install them on a new host.
+package deploy
+
+import _ "embed"
+
+//go:embed compose.yml
+var Compose string

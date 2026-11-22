@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"remote-cc/internal/agent"
@@ -49,6 +50,8 @@ func main() {
 		os.Exit(runServe(os.Args[2:]))
 	case "shim":
 		os.Exit(runShim(os.Args[2:]))
+	case "setup-server":
+		os.Exit(runSetupServer(os.Args[2:]))
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		os.Exit(runAccountCommand(os.Args[1], os.Args[2:]))
 	case "version", "--version":
@@ -86,6 +89,13 @@ options:
                    host's regular ~/.claude). Each account has its own config
                    dir there; settings, CLAUDE.md, skills, agents, commands
                    and plugins stay shared via symlinks.
+
+server (Docker):
+  rcc setup-server [--port 2222] [--bind 0.0.0.0] [--data /var/lib/remote-cc]
+                   [--image IMG] [--key FILE.pub]... [--keys-from-host]
+                   [--migrate-history] [ssh options] root@host
+                   install/update the server container on a host with Docker;
+                   authorizes your public key and pins the container's host key
 
 accounts (run on host, no mount):
   rcc login [--account NAME] [ssh options] host          claude auth login
@@ -194,6 +204,61 @@ func runAccountCommand(action string, args []string) int {
 		}
 	}
 	return code
+}
+
+// runSetupServer: rcc setup-server [setup flags] [ssh options] [user@]host
+func runSetupServer(args []string) int {
+	sc := session.SetupConfig{Port: 2222, Bind: "0.0.0.0", DataDir: "/var/lib/remote-cc",
+		InstallDir: "/opt/remote-cc", Image: "ghcr.io/notdesigned/remote-cc-server:latest"}
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := func() string {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "rcc: %s needs a value\n", a)
+				os.Exit(2)
+			}
+			i++
+			return args[i]
+		}
+		switch a {
+		case "--port":
+			p, err := strconv.Atoi(val())
+			if err != nil || p < 1 || p > 65535 {
+				fmt.Fprintln(os.Stderr, "rcc: bad --port")
+				return 2
+			}
+			sc.Port = p
+		case "--bind":
+			sc.Bind = val()
+		case "--data":
+			sc.DataDir = val()
+		case "--install-dir":
+			sc.InstallDir = val()
+		case "--image":
+			sc.Image = val()
+		case "--key":
+			sc.KeyFiles = append(sc.KeyFiles, val())
+		case "--keys-from-host":
+			sc.KeysFromHost = true
+		case "--migrate-history":
+			sc.MigrateHistory = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	cfg, pos, ok := parseArgs(rest)
+	if !ok || len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: rcc setup-server [--port N] [--bind ADDR] [--data DIR] [--image IMG] [--key FILE.pub]... [--keys-from-host] [--migrate-history] [ssh options] [user@]host")
+		return 2
+	}
+	cfg.Destination = pos[0]
+	sc.Config = cfg
+	if err := session.Setup(sc); err != nil {
+		fmt.Fprintln(os.Stderr, "rcc:", err)
+		return 1
+	}
+	return 0
 }
 
 func runShim(args []string) int {
