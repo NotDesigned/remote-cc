@@ -42,13 +42,26 @@ func newBareSession(cfg Config) (*session, func(), error) {
 	}
 	if s.facts["claude"] == "" {
 		cleanup()
-		return nil, nil, errors.New("claude was not found on the remote machine; install Claude Code there or pass --claude PATH")
+		return nil, nil, s.claudeMissing()
 	}
 	if s.facts["bin_base64"] == "" {
 		cleanup()
 		return nil, nil, errors.New("base64 is required on the remote machine")
 	}
 	return s, cleanup, nil
+}
+
+// claudeMissing explains a missing claude, spotting the common mistake of
+// connecting to the Docker host instead of the remote-cc container.
+func (s *session) claudeMissing() error {
+	if s.facts["rccserver"] == "1" {
+		return errors.New("claude is missing inside the remote-cc container; update it with rcc setup-server, or pass --claude PATH")
+	}
+	return fmt.Errorf("claude was not found on %s (host %q).\n"+
+		"     If the server was deployed with `rcc setup-server`, this is the Docker host, not the remote-cc container:\n"+
+		"     connect to the container's port instead (default 2222), e.g. in ~/.ssh/config:\n"+
+		"       Host cc\n         HostName <server address>\n         Port 2222\n         User root\n"+
+		"     Otherwise install Claude Code there or pass --claude PATH", s.cfg.Destination, s.facts["hostname"])
 }
 
 func (s *session) resolveAccount() error {

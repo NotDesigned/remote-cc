@@ -214,7 +214,7 @@ func (s *session) probe() (err error) {
 		problems = append(problems, "base64 and mountpoint (coreutils/util-linux) are required on the remote machine")
 	}
 	if f["claude"] == "" {
-		problems = append(problems, "claude was not found on the remote machine; install Claude Code there or pass --claude PATH")
+		problems = append(problems, s.claudeMissing().Error())
 	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "\n     "))

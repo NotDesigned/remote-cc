@@ -49,6 +49,20 @@ rcc cc           # 在项目目录里使用
 
 重复执行 `setup-server` 就是更新：更新配置、拉取镜像、重建容器，数据保留。
 
+**移除**：`rcc remove-server user@host` 会停止并删除容器、镜像和 `/opt/remote-cc`，同时删除本机 `known_hosts` 里的对应条目。数据目录默认保留，加 `--purge` 才会一起删除，里面包括 Claude 登录、对话历史和主机密钥。和 setup-server 一样支持 sudo 账号。
+
+**客户端配置**：A 连的是**容器**，不是宿主机。`Port` 要写容器的端口（默认 2222），`User` 写 `root`（容器里的 root）：
+
+```
+Host cc
+    HostName <服务器地址>
+    Port 2222
+    User root
+    IdentityFile ~/.ssh/id_ed25519    # setup-server 时授权的那把密钥
+```
+
+用 `ssh cc hostname` 检查，输出 `remote-cc` 就说明连对了。宿主机上不需要安装 Claude Code。
+
 **换服务器**：在新服务器上执行一次 `rcc setup-server`。如果要带走历史和登录，把旧服务器上的 `/var/lib/remote-cc` 复制到新服务器的同一位置，再执行 `setup-server`。
 
 ## 手动部署

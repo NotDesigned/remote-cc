@@ -196,6 +196,81 @@ then:
 	return nil
 }
 
+// removeScript stops and deletes a deployment; with PURGE=1 also its data.
+// Same sudo handling as setupScript.
+const removeScript = `
+set -e
+if [ "$(id -u)" != 0 ]; then
+  command -v sudo >/dev/null || { echo "rcc: not logged in as root and sudo is not installed" >&2; exit 3; }
+  if sudo -n true 2>/dev/null; then set -- sudo -n
+  elif [ "$HAVE_PASS" = 1 ]; then set -- sudo -S -p ""
+  else echo "rcc-needs-sudo-password"; exit 10; fi
+  exec "$@" sh -c "$(printf %s "$SELF_B64" | base64 -d)"
+fi
+[ -f "$DIR/compose.yml" ] || { echo "rcc: no remote-cc deployment in $DIR" >&2; exit 3; }
+cd "$DIR"
+data=$(sed -n 's/^RCC_DATA=//p' .env 2>/dev/null); port=$(sed -n 's/^RCC_PORT=//p' .env 2>/dev/null)
+echo "port=${port:-2222}"
+docker compose down --rmi all --remove-orphans >&2 || docker compose down --remove-orphans >&2
+cd / && rm -rf "$DIR"
+echo "rcc: removed the container and $DIR (the image too, unless another container still uses it)" >&2
+if [ "$PURGE" = 1 ] && [ -n "$data" ] && [ "$data" != / ]; then
+  rm -rf "$data" && echo "rcc: deleted the data directory $data (Claude logins, conversation history, host keys)" >&2
+elif [ -n "$data" ]; then
+  echo "rcc: kept the data directory $data (logins, history, host keys); delete it with --purge, or reuse it with setup-server --data $data" >&2
+fi
+`
+
+// Remove stops and deletes a deployment created by Setup.
+func Remove(cfg Config, installDir string, purge bool) error {
+	if cfg.SSH == "" {
+		cfg.SSH = "ssh"
+	}
+	s, cleanup, err := newSetupSession(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	params := vars("DIR", installDir, "PURGE", boolStr(purge))
+	inner := params + removeScript
+	run := func(password string) ([]byte, error) {
+		c := s.sshCmd(false, nil, params+vars("SELF_B64", base64Std(inner), "HAVE_PASS", boolStr(password != ""))+removeScript)
+		c.Stderr = os.Stderr
+		if password != "" {
+			c.Stdin = strings.NewReader(password + "\n")
+		}
+		return c.Output()
+	}
+	out, err := run("")
+	if bytes.Contains(out, []byte("rcc-needs-sudo-password")) {
+		pw, perr := readPassword(fmt.Sprintf("[sudo] password for %s: ", cfg.Destination))
+		if perr != nil {
+			return perr
+		}
+		out, err = run(pw)
+	}
+	if err != nil {
+		return fmt.Errorf("remove failed: %w", err)
+	}
+	port := 2222
+	for _, l := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(l, "port="); ok {
+			if p, e := strconv.Atoi(strings.TrimSpace(v)); e == nil {
+				port = p
+			}
+		}
+	}
+	host := resolveHostname(cfg.SSH, cfg.SSHArgs, cfg.Destination)
+	name := host
+	if port != 22 {
+		name = fmt.Sprintf("[%s]:%d", host, port)
+	}
+	if exec.Command("ssh-keygen", "-R", name).Run() == nil {
+		fmt.Fprintf(os.Stderr, "rcc: removed %s from your known_hosts\n", name)
+	}
+	return nil
+}
+
 func newSetupSession(cfg Config) (*session, func(), error) {
 	s := &session{cfg: cfg, id: randHex(6)}
 	s.logf = func(string, ...any) {}

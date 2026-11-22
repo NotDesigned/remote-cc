@@ -52,6 +52,8 @@ func main() {
 		os.Exit(runShim(os.Args[2:]))
 	case "setup-server":
 		os.Exit(runSetupServer(os.Args[2:]))
+	case "remove-server":
+		os.Exit(runRemoveServer(os.Args[2:]))
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		os.Exit(runAccountCommand(os.Args[1], os.Args[2:]))
 	case "version", "--version":
@@ -99,6 +101,10 @@ server (Docker):
                    authorizes your public key and pins the container's host key.
                    user is root or any account with sudo (asks for the sudo
                    password if needed); --install-docker uses get.docker.com
+
+  rcc remove-server [--purge] [--install-dir /opt/remote-cc] [ssh options] user@host
+                   stop and delete the container and its image; --purge also
+                   deletes the data dir (logins, history, host keys)
 
 accounts (run on host, no mount):
   rcc login [--account NAME] [ssh options] host          claude auth login
@@ -262,6 +268,38 @@ func runSetupServer(args []string) int {
 	cfg.Destination = pos[0]
 	sc.Config = cfg
 	if err := session.Setup(sc); err != nil {
+		fmt.Fprintln(os.Stderr, "rcc:", err)
+		return 1
+	}
+	return 0
+}
+
+// runRemoveServer: rcc remove-server [--purge] [--install-dir DIR] [ssh options] [user@]host
+func runRemoveServer(args []string) int {
+	dir, purge := "/opt/remote-cc", false
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--purge":
+			purge = true
+		case "--install-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "rcc: --install-dir needs a value")
+				return 2
+			}
+			i++
+			dir = args[i]
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	cfg, pos, ok := parseArgs(rest)
+	if !ok || len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: rcc remove-server [--purge] [--install-dir DIR] [ssh options] [user@]host")
+		return 2
+	}
+	cfg.Destination = pos[0]
+	if err := session.Remove(cfg, dir, purge); err != nil {
 		fmt.Fprintln(os.Stderr, "rcc:", err)
 		return 1
 	}
