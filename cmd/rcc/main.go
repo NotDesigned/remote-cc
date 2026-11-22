@@ -49,6 +49,8 @@ func main() {
 		os.Exit(runServe(os.Args[2:]))
 	case "shim":
 		os.Exit(runShim(os.Args[2:]))
+	case "login", "logout", "status", "setup-token", "token", "accounts":
+		os.Exit(runAccountCommand(os.Args[1], os.Args[2:]))
 	case "version", "--version":
 		fmt.Println("rcc", version)
 	case "help", "-h", "--help":
@@ -80,6 +82,19 @@ options:
   ssh options passed through: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER
                               -4 -6 -A -C -q
 
+  --account NAME   Claude account on host (default: $RCC_ACCOUNT, else the
+                   host's regular ~/.claude). Each account has its own config
+                   dir there; settings, CLAUDE.md, skills, agents, commands
+                   and plugins stay shared via symlinks.
+
+accounts (run on host, no mount):
+  rcc login [--account NAME] [ssh options] host          claude auth login
+  rcc logout|status [--account NAME] [ssh options] host  claude auth logout|status
+  rcc setup-token [--account NAME] [ssh options] host    claude setup-token
+  rcc token --account NAME [ssh options] host            store a setup-token for
+                   the account (read here, hidden); "-- --clear" removes it
+  rcc accounts [ssh options] host                        list accounts
+
 other commands:
   rcc serve [--listen ADDR] [--token TOKEN] [--shell PATH] [-q]
   rcc shim CMD
@@ -87,8 +102,10 @@ other commands:
 `)
 }
 
-func runSession(args []string) int {
-	cfg := session.Config{Mode: "auto"}
+// parseArgs parses rcc options shared by sessions and account commands.
+// It returns the config and the positional arguments.
+func parseArgs(args []string) (session.Config, []string, bool) {
+	cfg := session.Config{Mode: "auto", Account: os.Getenv("RCC_ACCOUNT")}
 	var pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -110,6 +127,8 @@ func runSession(args []string) int {
 			cfg.Mode = val()
 		case a == "--claude":
 			cfg.ClaudePath = val()
+		case a == "--account":
+			cfg.Account = val()
 		case a == "--no-prompt":
 			cfg.NoPrompt = true
 		case a == "--no-is-sandbox":
@@ -122,13 +141,17 @@ func runSession(args []string) int {
 			cfg.SSHArgs = append(cfg.SSHArgs, a)
 		case strings.HasPrefix(a, "-") && len(a) > 1:
 			fmt.Fprintf(os.Stderr, "rcc: unknown option %s\n", a)
-			usage()
-			return 2
+			return cfg, nil, false
 		default:
 			pos = append(pos, a)
 		}
 	}
-	if len(pos) < 1 || len(pos) > 2 {
+	return cfg, pos, true
+}
+
+func runSession(args []string) int {
+	cfg, pos, ok := parseArgs(args)
+	if !ok || len(pos) < 1 || len(pos) > 2 {
 		usage()
 		return 2
 	}
@@ -138,6 +161,32 @@ func runSession(args []string) int {
 		cfg.Dir = pos[1]
 	}
 	code, err := session.Run(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rcc:", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	return code
+}
+
+// runAccountCommand handles: login, logout, status, setup-token, token,
+// accounts. Extra claude arguments go after "--".
+func runAccountCommand(action string, args []string) int {
+	cfg, pos, ok := parseArgs(args)
+	if !ok || len(pos) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: rcc %s [options] [user@]host\n", action)
+		return 2
+	}
+	cfg.Destination = pos[0]
+	if action == "token" {
+		for _, a := range cfg.ClaudeArgs {
+			if a == "--clear" {
+				action = "token-clear"
+			}
+		}
+	}
+	code, err := session.Command(cfg, action, cfg.ClaudeArgs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rcc:", err)
 		if code == 0 {

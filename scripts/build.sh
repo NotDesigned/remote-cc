@@ -2,6 +2,7 @@
 # Builds rcc for all supported A platforms, each embedding Linux rcc-shim
 # binaries for the B side. Output: dist/
 set -e
+export GOTOOLCHAIN=local   # never auto-download a newer Go toolchain
 cd "$(dirname "$0")/.."
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
 LDFLAGS="-s -w -X main.version=$VERSION"

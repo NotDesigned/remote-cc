@@ -72,6 +72,7 @@ for d in "$CACHE"/run/*/; do
   rm -rf "$d"
 done
 mkdir -p "$RUN"
+` + accountPrep + `
 IFS= read -r tok
 printf '%s\n' "$tok" > "$RUN/token"
 if [ "$NEED_SHIM" = 1 ]; then
@@ -139,6 +140,7 @@ while :; do
   sleep 0.1
 done
 export RCC_SOCK="unix:$SOCK" RCC_TOKEN="$(cat "$RUN/token")" CLAUDE_CODE_SHELL_PREFIX="$CACHE/rcc-shim"
+` + accountEnv + `
 # As root, Claude Code refuses --dangerously-skip-permissions unless IS_SANDBOX=1.
 [ "$SANDBOX" = 1 ] && export IS_SANDBOX=1
 if [ "$MODE" = ns ]; then
@@ -162,4 +164,65 @@ if [ -f "$RUN/created" ]; then
   done
 fi
 rm -rf "$RUN" "$SOCK"
+`
+
+// accountPrep creates an account's config dir and links the user's shared
+// preferences from the default config dir into it. Existing entries are
+// never touched, so replacing a link with a real file un-shares that item.
+const accountPrep = `
+if [ -n "$ACCT_DIR" ]; then
+  ( umask 077; mkdir -p "$ACCT_DIR" )
+  for f in settings.json CLAUDE.md keybindings.json skills agents commands plugins output-styles; do
+    if [ ! -e "$ACCT_DIR/$f" ] && [ ! -L "$ACCT_DIR/$f" ] && [ -e "$DEFCFG/$f" ]; then
+      ln -s "$DEFCFG/$f" "$ACCT_DIR/$f"
+    fi
+  done
+fi
+`
+
+// accountEnv selects the account for a claude process started by the script.
+const accountEnv = `
+if [ -n "$ACCT_DIR" ]; then
+  export CLAUDE_CONFIG_DIR="$ACCT_DIR"
+  if [ -s "$ACCT_DIR/.rcc-oauth-token" ]; then
+    CLAUDE_CODE_OAUTH_TOKEN=$(cat "$ACCT_DIR/.rcc-oauth-token"); export CLAUDE_CODE_OAUTH_TOKEN
+  fi
+fi
+`
+
+// authScript runs one claude command for the account, with no mount or agent.
+const authScript = accountPrep + accountEnv + `
+exec "$CLAUDE" "$@"
+`
+
+// tokenScript stores (first stdin line) or clears the account's setup-token.
+const tokenScript = accountPrep + `
+umask 077
+f="$ACCT_DIR/.rcc-oauth-token"
+if [ "$ACTION" = clear ]; then rm -f "$f"; echo "token removed"; exit 0; fi
+IFS= read -r tok
+[ -n "$tok" ] || { echo "rcc: empty token" >&2; exit 2; }
+printf '%s\n' "$tok" > "$f.tmp" && mv -f "$f.tmp" "$f"
+echo "token saved"
+`
+
+// accountsScript prints, per account, a marker line and its auth status JSON.
+const accountsScript = `
+show() {
+  echo "@@ $1 $2"
+  if [ -n "$2" ]; then
+    tok=""; [ -s "$2/.rcc-oauth-token" ] && tok=1
+    CLAUDE_CONFIG_DIR="$2" CLAUDE_CODE_OAUTH_TOKEN=$( [ -n "$tok" ] && cat "$2/.rcc-oauth-token" ) "$CLAUDE" auth status --json 2>/dev/null </dev/null
+    echo; echo "@@token $tok"
+  else
+    "$CLAUDE" auth status --json 2>/dev/null </dev/null; echo
+  fi
+}
+show default ""
+for d in "$ACCTS"/*/; do
+  [ -d "$d" ] || continue
+  n=$(basename "$d")
+  show "$n" "${d%/}"
+done
+true
 `

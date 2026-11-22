@@ -23,10 +23,24 @@ rcc -p 2222 -i ~/.ssh/key user@B . -- --resume   # ssh 参数，-- 后面的参�
 rcc user@B -- --continue       # 继续这个目录上次的对话（--resume 选择历史对话）
 rcc --profile work user@B      # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
 rcc user@B -- --dangerously-skip-permissions   # B 是 root 时也能用（rcc 会设置 IS_SANDBOX=1，--no-is-sandbox 可关闭）
+rcc --account work user@B      # 使用 B 上的 work 账号（或者设置 RCC_ACCOUNT=work）
 rcc -v ...                     # 显示过程
 ```
 
 对话历史保存在 B 上，按本机隔离：两台机器即使项目路径相同，也不会看到对方的对话（需要 B 用 root 运行）。
+
+### 多账号
+
+```sh
+rcc login --account work user@B        # 登录：在本机浏览器打开链接，把授权码粘贴回来
+rcc status --account work user@B
+rcc accounts user@B                    # 列出所有账号的登录状态
+rcc setup-token --account ci user@B    # 生成长期令牌，然后：
+rcc token --account ci user@B          # 把令牌存进 ci 账号（隐藏输入）；-- --clear 删除
+rcc logout --account work user@B
+```
+
+每个账号在 B 上有独立的配置目录（凭据、组织策略、对话历史分开），settings、CLAUDE.md、skills、plugins 等个人配置共用。
 
 A 上执行的命令会记录到 `~/.cache/rcc/last.log`（Linux；其它平台在对应的用户缓存目录下）。
 

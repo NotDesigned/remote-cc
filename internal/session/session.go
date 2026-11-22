@@ -53,6 +53,10 @@ type Config struct {
 	// NoPrompt disables appending remote-cc's system prompt (which tells
 	// Claude that commands run on this machine, not on the remote host).
 	NoPrompt bool
+	// Account selects a Claude account on B: each has its own config dir
+	// (credentials, .claude.json, org policy) via CLAUDE_CONFIG_DIR. ""
+	// or "default" means B's regular config dir.
+	Account string
 	SSH         string // ssh binary, default "ssh"
 }
 
@@ -71,6 +75,9 @@ type session struct {
 	cache string
 	sock  string // command socket on B
 	prof  string // per-A history dir on B, "" = shared
+	acct  string // account config dir on B, "" = default
+	cfg0  string // B's default config dir
+	ccfg  string // config dir claude will use (acct or cfg0)
 
 	mu      sync.Mutex
 	stopped bool        // SIGTERM/SIGHUP received
@@ -164,7 +171,8 @@ func (s *session) closeMaster() {
 	c.Run()
 }
 
-func (s *session) probe() (err error) {
+// fetchFacts asks B for the key=value facts printed by probeScript.
+func (s *session) fetchFacts() error {
 	c := s.sshCmd(false, nil, probeScript)
 	c.Stdin = nil
 	c.Stderr = os.Stderr // auth prompts / host key questions go to the user
@@ -179,9 +187,19 @@ func (s *session) probe() (err error) {
 			s.facts[k] = v
 		}
 	}
+	if s.cfg.ClaudePath != "" {
+		s.facts["claude"] = s.cfg.ClaudePath
+	}
 	f := s.facts
 	s.logf("remote: %s/%s uid=%s claude=%s", f["os"], f["arch"], f["uid"], f["claude"])
+	return nil
+}
 
+func (s *session) probe() (err error) {
+	if err := s.fetchFacts(); err != nil {
+		return err
+	}
+	f := s.facts
 	var problems []string
 	if f["os"] != "Linux" {
 		problems = append(problems, fmt.Sprintf("remote OS is %q; only Linux is supported as the Claude Code host", f["os"]))
@@ -194,9 +212,6 @@ func (s *session) probe() (err error) {
 	}
 	if f["bin_base64"] == "" || f["bin_mountpoint"] == "" {
 		problems = append(problems, "base64 and mountpoint (coreutils/util-linux) are required on the remote machine")
-	}
-	if s.cfg.ClaudePath != "" {
-		f["claude"] = s.cfg.ClaudePath
 	}
 	if f["claude"] == "" {
 		problems = append(problems, "claude was not found on the remote machine; install Claude Code there or pass --claude PATH")
@@ -220,6 +235,10 @@ func (s *session) probe() (err error) {
 		return fmt.Errorf("unknown mode %q", s.cfg.Mode)
 	}
 
+	if err := s.resolveAccount(); err != nil {
+		return err
+	}
+
 	profile := s.cfg.Profile
 	if profile == "" {
 		if profile, err = MachineProfile(); err != nil {
@@ -229,6 +248,9 @@ func (s *session) probe() (err error) {
 	if profile != "none" {
 		if !validProfile(profile) {
 			return fmt.Errorf("invalid profile name %q (use letters, digits, '.', '_', '-')", profile)
+		}
+		if s.acct != "" {
+			profile += "@" + s.cfg.Account
 		}
 		if s.mode == "ns" {
 			s.prof = f["home"] + "/.local/share/rcc/profiles/" + profile
@@ -278,7 +300,8 @@ func (s *session) start() (int, error) {
 	need := hex.EncodeToString(sum[:]) != s.facts["shim_sha"]
 	s.logf("mode=%s mount=%s shim upload=%v", s.mode, s.remote, need)
 
-	prep := vars("RUN", s.run, "CACHE", s.cache, "NEED_SHIM", map[bool]string{true: "1", false: "0"}[need]) + prepareScript
+	prep := vars("RUN", s.run, "CACHE", s.cache, "NEED_SHIM", map[bool]string{true: "1", false: "0"}[need],
+		"ACCT_DIR", s.acct, "DEFCFG", s.cfg0) + prepareScript
 	c := s.sshCmd(false, nil, prep)
 	in := io.MultiReader(strings.NewReader(token+"\n"), bytes.NewReader(map[bool][]byte{true: shimBin}[need]))
 	c.Stdin, c.Stderr = in, os.Stderr
@@ -287,7 +310,7 @@ func (s *session) start() (int, error) {
 	}
 
 	common := vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote, "MODE", s.mode,
-		"PROF", s.prof, "CFG", s.facts["cfgdir"])
+		"PROF", s.prof, "CFG", s.ccfg, "ACCT_DIR", s.acct)
 	defer func() {
 		c := s.sshCmd(false, nil, common+cleanupScript)
 		c.Run()

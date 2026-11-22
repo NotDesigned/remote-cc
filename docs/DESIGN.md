@@ -170,6 +170,24 @@ B 上直接运行的 claude 看到的还是原来的目录。`--profile none` �
 还没隔离的部分：`~/.claude.json` 里按项目路径记录的状态（是否已信任该目录、项目级允许的工具等）仍然共用。
 global 模式（B 非 root）没有私有命名空间，无法做 bind mount，会打印警告，然后使用共享的历史。
 
+## 多账号
+
+一个 Claude 账号不只有凭据：`.credentials.json`、`.claude.json` 里的 `oauthAccount`（邮箱、组织），以及 `policy-limits.json`、`remote-settings.json`（组织策略）都和账号绑定，所以只替换凭据会出现身份不一致。
+解决办法是每个账号在 B 上有自己的配置目录 `~/.local/share/rcc/accounts/<name>/`，claude 通过 `CLAUDE_CONFIG_DIR` 使用它。
+已从二进制代码和实测两方面确认：设置 `CLAUDE_CONFIG_DIR` 后，`.claude.json` 和 `.credentials.json` 都会放到这个目录里；指向空目录时 `auth status` 显示 `loggedIn: false`，默认账号不受影响。
+
+- 选择账号：`--account NAME`，或者 A 上的环境变量 `RCC_ACCOUNT`。不指定或指定为 `default` 时，使用 B 原来的配置目录，和以前一样。非 root 的 global 模式同样支持。
+- 共享的个人配置：`settings.json`、`CLAUDE.md`、`keybindings.json`、`skills/`、`agents/`、`commands/`、`plugins/`、`output-styles/` 通过软链接指向默认配置目录，只链接实际存在的项，已有的文件不会被覆盖。
+  所以把某个链接换成真实文件，就能让这个账号单独使用该配置。注意：如果 Claude 用"写临时文件再改名"的方式保存 `settings.json`，链接会被替换成真实文件，之后这一项就不再共享（不会损坏数据）。
+  用户级的 MCP 服务器保存在 `.claude.json` 里，不会共享，每个账号要单独添加。
+- 历史：在 ns 模式下 profile 变成 `<profile>@<account>`，同一台 A 在不同账号下的历史互不可见。
+- 账号命令都只通过 ssh 直接执行，不挂载目录、不启动 agent：
+  `rcc login|logout|status|setup-token [--account N] host`，对应 `claude auth …` / `claude setup-token`；
+  `rcc token --account N host` 在 A 上以隐藏方式读入令牌，通过 stdin 存到账号目录的 `.rcc-oauth-token`（权限 0600），之后会话里导出为 `CLAUDE_CODE_OAUTH_TOKEN`，`-- --clear` 删除；
+  `rcc accounts host` 列出所有账号的登录状态、邮箱、组织、套餐，以及是否保存了令牌。
+- 已实测：新账号目录的建立和链接、令牌的保存与清除（权限 600）、accounts 列表、会话里 `CLAUDE_CONFIG_DIR` 和令牌的传递以及历史 profile（用一个打印环境的假 claude 验证）、`login` 能在 A 的终端显示 `https://claude.ai/oauth/authorize` 并等待粘贴授权码。
+  真实账号的授权和使用没有测，因为需要在浏览器里完成。`auth status` 对令牌只检查是否配置，不检查是否有效（假令牌也会显示 loggedIn），这一点和 cc-desk-tunnel 文档里的说明一致。
+
 ## 实现选型
 
 - **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。
