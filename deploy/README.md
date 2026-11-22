@@ -26,7 +26,21 @@ rcc setup-server --install-docker ubuntu@新服务器   # 全新的机器，还�
 - 拉取 `ghcr.io/notdesigned/remote-cc-server` 并启动容器。
 - 把容器的主机公钥写进你本机的 `known_hosts`。这个公钥是通过已经验证过的 ssh 连接取得的，所以第一次连接容器时不需要盲目信任指纹。
 
-最后它会打印一段 `~/.ssh/config` 配置，按提示操作：
+最后它会**在本机实际测试一下容器的端口能否连通**，然后打印对应的 `~/.ssh/config` 配置：
+- **端口能连通**：直连配置，`HostName <服务器>`、`Port 2222`。
+- **端口不通**（通常是云服务商的安全组或防火墙没有放行）：要么去放行该 TCP 端口，要么使用它打印的跳转配置，通过宿主机原有的 ssh 进入容器：
+  ```
+  Host cc
+      HostName 127.0.0.1
+      Port 2222
+      User root
+      ProxyJump <宿主机，即 setup-server 时用的那个目标>
+      HostKeyAlias [<服务器地址>]:2222
+  ```
+  `HostKeyAlias` 必须带方括号和端口。setup-server 写进 known_hosts 的记录就是 `[服务器]:2222`，而 ssh 用 HostKeyAlias 查找时会原样使用它，不会再拼接端口（已实测）。
+  缺点是 Windows 的 ssh 不能复用连接，每次连接都要走两跳，会慢一些。
+
+按提示操作：
 
 ```sh
 rcc login cc     # 在容器里登录 Claude（每个账号一次）
@@ -47,7 +61,9 @@ rcc cc           # 在项目目录里使用
 | `--name NAME` | remote-cc | 容器名，同一台机器可以按不同名字、端口、数据目录跑多个实例 |
 | `--install-docker` | 关 | 没有 Docker 时，用官方脚本 get.docker.com 安装 |
 
-重复执行 `setup-server` 就是更新：更新配置、拉取镜像、重建容器，数据保留。
+**更新**：`rcc update-server user@host` 会拉取最新镜像（包含新版 Claude Code），只有镜像或 compose 配置变化时才重建容器，数据、公钥和端口都保留。
+如果有会话正在进行，它会拒绝执行并说明原因，加 `--force` 可以强制更新。更新后会清理被替换掉的旧 remote-cc 镜像，只删除带本项目标签的悬空镜像。
+重复执行 `setup-server` 也可以，但它不会主动拉取更新的镜像。
 
 **移除**：`rcc remove-server user@host` 会停止并删除容器、镜像和 `/opt/remote-cc`，同时删除本机 `known_hosts` 里的对应条目。数据目录默认保留，加 `--purge` 才会一起删除，里面包括 Claude 登录、对话历史和主机密钥。和 setup-server 一样支持 sudo 账号。
 

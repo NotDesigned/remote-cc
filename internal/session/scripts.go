@@ -51,8 +51,8 @@ for f in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/c
   [ -n "$c" ] || { [ -x "$f" ] && c=$f; }
 done
 echo "claude=$c"
-f="$HOME/.cache/rcc/rcc-shim"
-[ -x "$f" ] && command -v sha256sum >/dev/null && echo "shim_sha=$(sha256sum < "$f" | cut -c1-64)"
+# Installed shims, one directory per content hash (versions coexist).
+echo "shims=$(ls "$HOME/.cache/rcc/shims" 2>/dev/null | tr '\n' ',')"
 true
 `
 
@@ -79,11 +79,19 @@ mkdir -p "$RUN"
 ` + accountPrep + `
 IFS= read -r tok
 printf '%s\n' "$tok" > "$RUN/token"
+# Shims live at shims/<sha256>/rcc-shim: concurrent sessions of different
+# rcc versions never replace each other's shim, and uploads use a private
+# temp name so simultaneous first connections cannot collide.
+mkdir -p "$CACHE/shims/$SHIM_SHA"
 if [ "$NEED_SHIM" = 1 ]; then
-  cat > "$CACHE/rcc-shim.tmp"
-  chmod 755 "$CACHE/rcc-shim.tmp"
-  mv -f "$CACHE/rcc-shim.tmp" "$CACHE/rcc-shim"
+  tmp="$CACHE/shims/$SHIM_SHA/.rcc-shim.$$"
+  cat > "$tmp"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$CACHE/shims/$SHIM_SHA/rcc-shim"
 fi
+touch "$CACHE/shims/$SHIM_SHA"
+find "$CACHE/shims" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+rm -f "$CACHE/rcc-shim" "$CACHE/rcc-shim.tmp"   # layout of rcc <= 0.2
 `
 
 // mountScript runs sshfs in slave mode on this session's stdio. In ns mode
@@ -143,7 +151,7 @@ while :; do
   fi
   sleep 0.1
 done
-export RCC_SOCK="unix:$SOCK" RCC_TOKEN="$(cat "$RUN/token")" CLAUDE_CODE_SHELL_PREFIX="$CACHE/rcc-shim"
+export RCC_SOCK="unix:$SOCK" RCC_TOKEN="$(cat "$RUN/token")" CLAUDE_CODE_SHELL_PREFIX="$CACHE/shims/$SHIM_SHA/rcc-shim"
 ` + accountEnv + `
 # As root, Claude Code refuses --dangerously-skip-permissions unless IS_SANDBOX=1.
 [ "$SANDBOX" = 1 ] && export IS_SANDBOX=1

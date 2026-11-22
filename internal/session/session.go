@@ -55,7 +55,8 @@ type Config struct {
 	NoPrompt bool
 	// Account selects a Claude account on B: each has its own config dir
 	// (credentials, .claude.json, org policy) via CLAUDE_CONFIG_DIR. ""
-	// or "default" means B's regular config dir.
+	// means this machine's own account (named like its history profile);
+	// "default" or "shared" means B's regular config dir.
 	Account string
 	SSH         string // ssh binary, default "ssh"
 }
@@ -75,7 +76,8 @@ type session struct {
 	cache string
 	sock  string // command socket on B
 	prof  string // per-A history dir on B, "" = shared
-	acct  string // account config dir on B, "" = default
+	acct  string // account config dir on B, "" = shared default
+	autoAccount bool // acct is this machine's own default account
 	cfg0  string // B's default config dir
 	ccfg  string // config dir claude will use (acct or cfg0)
 
@@ -249,7 +251,9 @@ func (s *session) probe() (err error) {
 		if !validProfile(profile) {
 			return fmt.Errorf("invalid profile name %q (use letters, digits, '.', '_', '-')", profile)
 		}
-		if s.acct != "" {
+		// History of a named account is kept apart from this machine's own
+		// (the machine's own account uses the plain profile, as before).
+		if s.acct != "" && !s.autoAccount {
 			profile += "@" + s.cfg.Account
 		}
 		if s.mode == "ns" {
@@ -297,24 +301,26 @@ func (s *session) start() (int, error) {
 		return 1, err
 	}
 	sum := sha256.Sum256(shimBin)
-	need := hex.EncodeToString(sum[:]) != s.facts["shim_sha"]
+	shimSHA := hex.EncodeToString(sum[:])
+	need := !strings.Contains(","+s.facts["shims"], ","+shimSHA+",")
 	s.logf("mode=%s mount=%s shim upload=%v", s.mode, s.remote, need)
 
+	common := vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote, "MODE", s.mode,
+		"PROF", s.prof, "CFG", s.ccfg, "ACCT_DIR", s.acct, "SHIM_SHA", shimSHA)
+	// Registered before prepare, so a failed prepare leaves nothing behind.
+	defer func() {
+		c := s.sshCmd(false, nil, common+cleanupScript)
+		c.Run()
+	}()
+
 	prep := vars("RUN", s.run, "CACHE", s.cache, "NEED_SHIM", map[bool]string{true: "1", false: "0"}[need],
-		"ACCT_DIR", s.acct, "DEFCFG", s.cfg0) + prepareScript
+		"SHIM_SHA", shimSHA, "ACCT_DIR", s.acct, "DEFCFG", s.cfg0) + prepareScript
 	c := s.sshCmd(false, nil, prep)
 	in := io.MultiReader(strings.NewReader(token+"\n"), bytes.NewReader(map[bool][]byte{true: shimBin}[need]))
 	c.Stdin, c.Stderr = in, os.Stderr
 	if err := c.Run(); err != nil {
 		return 1, fmt.Errorf("preparing remote machine: %w", err)
 	}
-
-	common := vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote, "MODE", s.mode,
-		"PROF", s.prof, "CFG", s.ccfg, "ACCT_DIR", s.acct)
-	defer func() {
-		c := s.sshCmd(false, nil, common+cleanupScript)
-		c.Run()
-	}()
 
 	// --- command agent
 	logFile := s.openLog()
@@ -474,6 +480,10 @@ func (x rwc) Write(p []byte) (int, error) { return x.w.Write(p) }
 func (x rwc) Close() error                { return x.w.Close() }
 
 func isWindows() bool { return runtime.GOOS == "windows" }
+
+// Prog is the name rcc was invoked as (e.g. "remote-cc"), used in hints so
+// they can be pasted as-is; "rcc" may be another program on the user's PATH.
+var Prog = "rcc"
 
 func randHex(n int) string {
 	b := make([]byte, n)

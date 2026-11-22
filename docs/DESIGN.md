@@ -210,6 +210,18 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
   实测用了两个临时用户：免密 sudo 时，`--keys-from-host` 和 `--migrate-history` 都取自该用户的家目录；需要密码时，未提供密码、密码错误、密码正确三种情况都符合预期，密码没有出现在进程列表和日志里。
 - **磁盘**：在 B 上本地构建会临时产生约 2GB 的构建缓存，开发时一度把这台机器的磁盘写满了。所以镜像改由 CI 构建，服务器只拉取。
 
+## 凭据默认按机器分开、shim 按内容寻址、更新命令（v0.3.0）
+
+- **默认账号**：不指定 `--account` 时，使用本机专属账号，名字和机器 profile 相同（`<hostname>-<随机>`），配置目录是 `accounts/<名字>`；这种情况下历史 profile 不加 `@账号` 后缀，已有的历史位置不变。
+  `--account default|shared` 使用 B 上共用的 `~/.claude`。实测：两台模拟的 A 同时连同一个容器、使用同一个项目路径，账号目录、历史、命令执行都各自正确。
+- **shim 按内容寻址**：并发测试发现两个 bug。一是两台 A 同时首次连接时，上传 shim 共用了同一个 `rcc-shim.tmp`，导致其中一个 `mv` 失败；二是不同版本的 rcc 会互相覆盖 B 上唯一的 `rcc-shim`。
+  现在 shim 放在 `~/.cache/rcc/shims/<sha256>/rcc-shim`，上传时用会话独有的临时文件名，每次使用时更新时间戳，30 天没用过的版本会被清理。prepare 失败时也会执行清理。
+- **`rcc update`**：从 GitHub Release 下载本平台的二进制，用 SHA256SUMS 校验，先写到可执行文件同目录的临时文件，再原子改名替换；Windows 上先把正在运行的 exe 改名为 `.old`，下次启动时删除。`rcc version --check` 用于查看最新版本。
+- **`rcc update-server`**：总是先拉取镜像，再比较容器当前的镜像 ID 和新镜像 ID，以及 compose 文件内容。都没变就不碰容器；有变化而容器里还有会话在运行时，拒绝执行（退出码 5），除非 `--force`。
+  更新后按 `org.opencontainers.image.source` 标签清理悬空镜像。只有容器 ID 真的变了才报告"已更新"。实测了五种情况：无变化、镜像有更新、只改注释、有活跃会话被拒绝、`--force`。
+- **端口可达性**：setup-server 最后从 A 直接连一次容器端口，连不上时打印 ProxyJump 配置，其中 `HostKeyAlias [host]:port` 是实测确认过的写法。
+- **命令名**：提示文字使用实际调用的程序名。有用户的 PATH 里有 Anaconda/Qt 的 `rcc.exe`，按我们的提示执行 `rcc cc` 时，运行的是那个程序。
+
 ## 实现选型
 
 - **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。

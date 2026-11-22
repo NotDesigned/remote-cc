@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"remote-cc/deploy"
 )
@@ -140,27 +142,8 @@ func Setup(sc SetupConfig) error {
 		"KEYS_FROM_HOST", boolStr(sc.KeysFromHost), "MIGRATE", boolStr(sc.MigrateHistory),
 		"INSTALL_DOCKER", boolStr(sc.InstallDocker),
 	)
-	// The script embeds itself (as root it skips the sudo step) so it can
-	// re-run under sudo with the same parameters.
-	inner := params + setupScript
-	run := func(password string) ([]byte, error) {
-		script := params + vars("SELF_B64", base64Std(inner), "HAVE_PASS", boolStr(password != "")) + setupScript
-		c := s.sshCmd(false, nil, script)
-		c.Stderr = os.Stderr
-		if password != "" {
-			c.Stdin = strings.NewReader(password + "\n")
-		}
-		return c.Output()
-	}
 	fmt.Fprintf(os.Stderr, "rcc: installing remote-cc server on %s (port %d, data %s) …\n", sc.Destination, sc.Port, sc.DataDir)
-	out, err := run("")
-	if bytes.Contains(out, []byte("rcc-needs-sudo-password")) {
-		pw, perr := readPassword(fmt.Sprintf("[sudo] password for %s: ", sc.Destination))
-		if perr != nil {
-			return perr
-		}
-		out, err = run(pw)
-	}
+	out, err := s.runElevated(params, setupScript)
 	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
 	}
@@ -177,36 +160,37 @@ func Setup(sc SetupConfig) error {
 			fmt.Fprintf(os.Stderr, "rcc: warning: could not update known_hosts: %v\n", err)
 		}
 	}
-	fmt.Printf(`
-remote-cc server is running: %s
-  host key   %s  (added to your known_hosts, fetched over the verified ssh connection)
+	fmt.Printf("\nremote-cc server is running: %s\n  host key   %s  (added to your known_hosts, fetched over the verified ssh connection)\n\n",
+		facts["claude"], facts["fingerprint"])
 
-Add this to your ssh config (~/.ssh/config, on Windows %%USERPROFILE%%\.ssh\config):
-
-  Host cc
-      HostName %s
-      Port %d
-      User root
-      ServerAliveInterval 15
-
-then:
-  rcc login cc        # sign in to Claude inside the container (once per account)
-  rcc cc              # in a project directory
-`, facts["claude"], facts["fingerprint"], host, sc.Port)
+	direct := sc.Bind != "127.0.0.1" && sc.Bind != "localhost" && reachable(host, sc.Port)
+	switch {
+	case direct:
+		fmt.Printf("Port %d is reachable from here. Add this to your ssh config (%s):\n\n"+
+			"  Host cc\n      HostName %s\n      Port %d\n      User root\n      ServerAliveInterval 15\n",
+			sc.Port, sshConfigPath(), host, sc.Port)
+	default:
+		if sc.Bind != "127.0.0.1" && sc.Bind != "localhost" {
+			fmt.Printf("Port %d on %s is NOT reachable from here (a cloud firewall / security group usually blocks it).\n"+
+				"Either open TCP %d there, or reach the container through the host's own ssh, as below.\n\n", sc.Port, host, sc.Port)
+		}
+		// HostKeyAlias keeps using the pinned "[host]:port" known_hosts entry.
+		fmt.Printf("Add this to your ssh config (%s):\n\n"+
+			"  Host cc\n      HostName 127.0.0.1\n      Port %d\n      User root\n      ProxyJump %s\n      HostKeyAlias [%s]:%d\n      ServerAliveInterval 15\n",
+			sshConfigPath(), sc.Port, sc.Destination, host, sc.Port)
+		if len(sc.SSHArgs) > 0 {
+			fmt.Printf("  (ProxyJump uses %q as written: put the ssh options you passed here into a Host entry for it.)\n", sc.Destination)
+		}
+	}
+	fmt.Printf("\nCheck it with:  ssh cc hostname     (should print the container name, %s)\nthen:\n"+
+		"  %s login cc        # sign in to Claude inside the container (once per machine)\n"+
+		"  %s cc              # in a project directory\n", sc.Name, Prog, Prog)
 	return nil
 }
 
 // removeScript stops and deletes a deployment; with PURGE=1 also its data.
 // Same sudo handling as setupScript.
-const removeScript = `
-set -e
-if [ "$(id -u)" != 0 ]; then
-  command -v sudo >/dev/null || { echo "rcc: not logged in as root and sudo is not installed" >&2; exit 3; }
-  if sudo -n true 2>/dev/null; then set -- sudo -n
-  elif [ "$HAVE_PASS" = 1 ]; then set -- sudo -S -p ""
-  else echo "rcc-needs-sudo-password"; exit 10; fi
-  exec "$@" sh -c "$(printf %s "$SELF_B64" | base64 -d)"
-fi
+const removeScript = sudoPrelude + `
 [ -f "$DIR/compose.yml" ] || { echo "rcc: no remote-cc deployment in $DIR" >&2; exit 3; }
 cd "$DIR"
 data=$(sed -n 's/^RCC_DATA=//p' .env 2>/dev/null); port=$(sed -n 's/^RCC_PORT=//p' .env 2>/dev/null)
@@ -221,6 +205,73 @@ elif [ -n "$data" ]; then
 fi
 `
 
+// updateScript pulls the image and recreates the container only when the
+// image or compose file changed; refuses (unless FORCE) while sessions run.
+const updateScript = sudoPrelude + `
+[ -f "$DIR/compose.yml" ] && [ -f "$DIR/.env" ] || { echo "rcc: no remote-cc deployment in $DIR (use setup-server)" >&2; exit 3; }
+cd "$DIR"
+name=$(sed -n 's/^RCC_NAME=//p' .env); name=${name:-remote-cc}
+grep -q '^RCC_NAME=' .env || echo "RCC_NAME=$name" >> .env
+if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
+image=$(sed -n 's/^RCC_IMAGE=//p' .env)
+echo "before=$(docker exec "$name" claude --version 2>/dev/null | head -1)"
+docker compose pull -q >&2 || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
+new_compose=$(printf '%s' "$COMPOSE_B64" | base64 -d)
+cur=$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)
+latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
+if [ -n "$cur" ] && [ "$cur" = "$latest" ] && [ "$new_compose" = "$(cat compose.yml)" ]; then
+  echo "uptodate=1"
+  exit 0
+fi
+active=$(docker exec "$name" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); done; echo $n' 2>/dev/null || echo 0)
+if [ "${active:-0}" -gt 0 ] && [ "$FORCE" != 1 ]; then
+  echo "rcc: $active active session(s) in $name would be disconnected by the update; retry when they end, or pass --force" >&2
+  exit 5
+fi
+cid0=$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null || true)
+printf '%s\n' "$new_compose" > compose.yml
+docker compose up -d >&2
+i=0
+until docker exec "$name" test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null; do
+  i=$((i+1)); [ $i -gt 60 ] && { docker compose logs --tail 30 >&2; echo "rcc: container did not come up" >&2; exit 4; }
+  sleep 1
+done
+# Drop superseded remote-cc images (dangling, ours only) so updates don't fill the disk.
+docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/NotDesigned/remote-cc" >/dev/null 2>&1 || true
+echo "after=$(docker exec "$name" claude --version 2>/dev/null | head -1)"
+[ "$cid0" != "$(docker inspect -f '{{.Id}}' "$name")" ] && echo "recreated=1" || true
+`
+
+// UpdateServer pulls the latest server image and recreates the container if
+// anything changed. Data, keys and settings are kept.
+func UpdateServer(cfg Config, installDir, image string, force bool) error {
+	if cfg.SSH == "" {
+		cfg.SSH = "ssh"
+	}
+	s, cleanup, err := newSetupSession(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	fmt.Fprintf(os.Stderr, "rcc: updating remote-cc server on %s …\n", cfg.Destination)
+	out, err := s.runElevated(vars("DIR", installDir, "IMAGE", image, "FORCE", boolStr(force),
+		"COMPOSE_B64", base64Std(deploy.Compose)), updateScript)
+	if err != nil {
+		return fmt.Errorf("update failed: %w", err)
+	}
+	f := parseFacts(out)
+	if f["uptodate"] == "1" {
+		fmt.Printf("remote-cc server is up to date (%s)\n", f["before"])
+		return nil
+	}
+	if f["recreated"] != "1" {
+		fmt.Printf("remote-cc server is up to date (%s); its compose file was refreshed\n", f["after"])
+		return nil
+	}
+	fmt.Printf("remote-cc server updated (container recreated): %s -> %s\n", dash(f["before"]), dash(f["after"]))
+	return nil
+}
+
 // Remove stops and deletes a deployment created by Setup.
 func Remove(cfg Config, installDir string, purge bool) error {
 	if cfg.SSH == "" {
@@ -231,24 +282,7 @@ func Remove(cfg Config, installDir string, purge bool) error {
 		return err
 	}
 	defer cleanup()
-	params := vars("DIR", installDir, "PURGE", boolStr(purge))
-	inner := params + removeScript
-	run := func(password string) ([]byte, error) {
-		c := s.sshCmd(false, nil, params+vars("SELF_B64", base64Std(inner), "HAVE_PASS", boolStr(password != ""))+removeScript)
-		c.Stderr = os.Stderr
-		if password != "" {
-			c.Stdin = strings.NewReader(password + "\n")
-		}
-		return c.Output()
-	}
-	out, err := run("")
-	if bytes.Contains(out, []byte("rcc-needs-sudo-password")) {
-		pw, perr := readPassword(fmt.Sprintf("[sudo] password for %s: ", cfg.Destination))
-		if perr != nil {
-			return perr
-		}
-		out, err = run(pw)
-	}
+	out, err := s.runElevated(vars("DIR", installDir, "PURGE", boolStr(purge)), removeScript)
 	if err != nil {
 		return fmt.Errorf("remove failed: %w", err)
 	}
@@ -269,6 +303,70 @@ func Remove(cfg Config, installDir string, purge bool) error {
 		fmt.Fprintf(os.Stderr, "rcc: removed %s from your known_hosts\n", name)
 	}
 	return nil
+}
+
+// sudoPrelude makes a host script re-run itself as root via sudo; see
+// runElevated. Scripts with extra pre-elevation work (setupScript) carry
+// their own variant.
+const sudoPrelude = `
+set -e
+if [ "$(id -u)" != 0 ]; then
+  command -v sudo >/dev/null || { echo "rcc: not logged in as root and sudo is not installed" >&2; exit 3; }
+  if sudo -n true 2>/dev/null; then set -- sudo -n
+  elif [ "$HAVE_PASS" = 1 ]; then set -- sudo -S -p ""
+  else echo "rcc-needs-sudo-password"; exit 10; fi
+  exec "$@" sh -c "$(printf %s "$SELF_B64" | base64 -d)"
+fi
+`
+
+// runElevated runs params+body on the host. The body embeds itself (as
+// SELF_B64) so that, when not root, it can re-run under sudo; if sudo asks
+// for a password it is read here (hidden) and passed on stdin.
+func (s *session) runElevated(params, body string) ([]byte, error) {
+	inner := params + body
+	run := func(password string) ([]byte, error) {
+		c := s.sshCmd(false, nil, params+vars("SELF_B64", base64Std(inner), "HAVE_PASS", boolStr(password != ""))+body)
+		c.Stderr = os.Stderr
+		if password != "" {
+			c.Stdin = strings.NewReader(password + "\n")
+		}
+		return c.Output()
+	}
+	out, err := run("")
+	if bytes.Contains(out, []byte("rcc-needs-sudo-password")) {
+		pw, perr := readPassword(fmt.Sprintf("[sudo] password for %s: ", s.cfg.Destination))
+		if perr != nil {
+			return nil, perr
+		}
+		out, err = run(pw)
+	}
+	return out, err
+}
+
+func parseFacts(out []byte) map[string]string {
+	m := map[string]string{}
+	for _, l := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok && k != "" && !strings.ContainsAny(k, " \t") {
+			m[k] = strings.TrimSpace(v)
+		}
+	}
+	return m
+}
+
+func reachable(host string, port int) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 6*time.Second)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+func sshConfigPath() string {
+	if isWindows() {
+		return `%USERPROFILE%\.ssh\config`
+	}
+	return "~/.ssh/config"
 }
 
 func newSetupSession(cfg Config) (*session, func(), error) {

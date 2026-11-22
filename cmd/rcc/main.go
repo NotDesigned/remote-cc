@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"remote-cc/internal/agent"
+	"remote-cc/internal/update"
 	"remote-cc/internal/procjob"
 	"remote-cc/internal/session"
 	"remote-cc/internal/shim"
@@ -39,6 +40,8 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	session.Prog = prog()
+	update.CleanupOld()
 	if os.Args[1] != "shim" && os.Args[1] != "version" && os.Args[1] != "--version" {
 		// Whatever rcc starts on this machine (commands, ssh) ends with it.
 		if err := procjob.KillOnExit(); err != nil {
@@ -54,10 +57,19 @@ func main() {
 		os.Exit(runSetupServer(os.Args[2:]))
 	case "remove-server":
 		os.Exit(runRemoveServer(os.Args[2:]))
+	case "update-server":
+		os.Exit(runUpdateServer(os.Args[2:]))
+	case "update":
+		os.Exit(runUpdate(os.Args[2:]))
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		os.Exit(runAccountCommand(os.Args[1], os.Args[2:]))
 	case "version", "--version":
 		fmt.Println("rcc", version)
+		if len(os.Args) > 2 && os.Args[2] == "--check" {
+			if tag, err := update.Latest(); err == nil {
+				fmt.Printf("latest release: %s%s\n", tag, map[bool]string{true: "  (run: " + prog() + " update)", false: ""}[update.Newer(tag, version)])
+			}
+		}
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -65,8 +77,22 @@ func main() {
 	}
 }
 
+// prog is the name rcc was invoked as, without .exe.
+func prog() string {
+	return strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+}
+
 func usage() {
-	fmt.Fprint(os.Stderr, `usage:
+	fmt.Fprint(os.Stderr, usageText())
+}
+
+func usageText() string {
+	p := prog()
+	t := strings.ReplaceAll(usageTemplate, "\n  rcc ", "\n  "+p+" ")
+	return strings.Replace(t, "usage:\n", "usage:\n", 1)
+}
+
+const usageTemplate = `usage:
   rcc [options] [user@]host [dir] [-- claude-args...]
 
   Runs Claude Code on host, working on dir (default: current directory) of
@@ -87,10 +113,11 @@ options:
   ssh options passed through: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER
                               -4 -6 -A -C -q
 
-  --account NAME   Claude account on host (default: $RCC_ACCOUNT, else the
-                   host's regular ~/.claude). Each account has its own config
-                   dir there; settings, CLAUDE.md, skills, agents, commands
-                   and plugins stay shared via symlinks.
+  --account NAME   Claude account on host (default: $RCC_ACCOUNT, else this
+                   machine's own account, so machines never share Claude
+                   credentials; "default" = the host's shared ~/.claude). Each
+                   account has its own config dir there; settings, CLAUDE.md,
+                   skills, agents, commands and plugins stay shared via symlinks.
 
 server (Docker):
   rcc setup-server [--port 2222] [--bind 0.0.0.0] [--data /var/lib/remote-cc]
@@ -106,6 +133,15 @@ server (Docker):
                    stop and delete the container and its image; --purge also
                    deletes the data dir (logins, history, host keys)
 
+  rcc update-server [--force] [--image IMG] [ssh options] user@host
+                   pull the latest server image (new Claude Code) and recreate
+                   the container if anything changed; data and keys are kept;
+                   refuses while sessions are running unless --force
+
+updates:
+  rcc update [--check] [--version vX.Y.Z]   replace this rcc with a release
+  rcc version [--check]
+
 accounts (run on host, no mount):
   rcc login [--account NAME] [ssh options] host          claude auth login
   rcc logout|status [--account NAME] [ssh options] host  claude auth logout|status
@@ -118,8 +154,7 @@ other commands:
   rcc serve [--listen ADDR] [--token TOKEN] [--shell PATH] [-q]
   rcc shim CMD
   rcc version
-`)
-}
+`
 
 // parseArgs parses rcc options shared by sessions and account commands.
 // It returns the config and the positional arguments.
@@ -300,6 +335,94 @@ func runRemoveServer(args []string) int {
 	}
 	cfg.Destination = pos[0]
 	if err := session.Remove(cfg, dir, purge); err != nil {
+		fmt.Fprintln(os.Stderr, "rcc:", err)
+		return 1
+	}
+	return 0
+}
+
+// runUpdate: rcc update [--check] [--force] [--version vX.Y.Z]
+func runUpdate(args []string) int {
+	check, force, want := false, false, ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--check":
+			check = true
+		case "--force":
+			force = true
+		case "--version":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "rcc: --version needs a value")
+				return 2
+			}
+			i++
+			want = args[i]
+		default:
+			fmt.Fprintln(os.Stderr, "usage: rcc update [--check] [--force] [--version vX.Y.Z]")
+			return 2
+		}
+	}
+	tag := want
+	if tag == "" {
+		var err error
+		if tag, err = update.Latest(); err != nil {
+			fmt.Fprintln(os.Stderr, "rcc:", err)
+			return 1
+		}
+	}
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	fmt.Printf("current: %s   %s: %s\n", version, map[bool]string{true: "requested", false: "latest"}[want != ""], tag)
+	if check {
+		return 0
+	}
+	if want == "" && !force && !update.Newer(tag, version) {
+		fmt.Println("already up to date")
+		return 0
+	}
+	exe, err := update.Install(tag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rcc: update failed:", err)
+		return 1
+	}
+	fmt.Printf("updated %s to %s\n", exe, tag)
+		fmt.Printf("servers: run `%s update-server <host>` to update a remote-cc server container\n", prog())
+	return 0
+}
+
+// runUpdateServer: rcc update-server [--force] [--image IMG] [--install-dir DIR] [ssh options] [user@]host
+func runUpdateServer(args []string) int {
+	dir, image, force := "/opt/remote-cc", "", false
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := func() string {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "rcc: %s needs a value\n", a)
+				os.Exit(2)
+			}
+			i++
+			return args[i]
+		}
+		switch a {
+		case "--force":
+			force = true
+		case "--image":
+			image = val()
+		case "--install-dir":
+			dir = val()
+		default:
+			rest = append(rest, a)
+		}
+	}
+	cfg, pos, ok := parseArgs(rest)
+	if !ok || len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: rcc update-server [--force] [--image IMG] [--install-dir DIR] [ssh options] [user@]host")
+		return 2
+	}
+	cfg.Destination = pos[0]
+	if err := session.UpdateServer(cfg, dir, image, force); err != nil {
 		fmt.Fprintln(os.Stderr, "rcc:", err)
 		return 1
 	}

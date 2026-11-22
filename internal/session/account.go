@@ -58,7 +58,7 @@ func (s *session) claudeMissing() error {
 		return errors.New("claude is missing inside the remote-cc container; update it with rcc setup-server, or pass --claude PATH")
 	}
 	return fmt.Errorf("claude was not found on %s (host %q).\n"+
-		"     If the server was deployed with `rcc setup-server`, this is the Docker host, not the remote-cc container:\n"+
+		"     If the server was deployed with `"+Prog+" setup-server`, this is the Docker host, not the remote-cc container:\n"+
 		"     connect to the container's port instead (default 2222), e.g. in ~/.ssh/config:\n"+
 		"       Host cc\n         HostName <server address>\n         Port 2222\n         User root\n"+
 		"     Otherwise install Claude Code there or pass --claude PATH", s.cfg.Destination, s.facts["hostname"])
@@ -68,9 +68,20 @@ func (s *session) resolveAccount() error {
 	s.cfg0 = s.facts["cfgdir"]
 	s.ccfg = s.cfg0
 	a := s.cfg.Account
-	if a == "" || a == "default" {
+	switch a {
+	case "default", "shared":
+		// Explicitly the host's regular config dir, shared by every machine.
 		s.cfg.Account = ""
+		s.logf("account: shared (%s)", s.cfg0)
 		return nil
+	case "":
+		// Default: this machine's own account, so no two machines ever share
+		// Claude credentials unless asked to.
+		p, err := MachineProfile()
+		if err != nil {
+			return err
+		}
+		a, s.cfg.Account, s.autoAccount = p, p, true
 	}
 	if !validProfile(a) {
 		return fmt.Errorf("invalid account name %q (use letters, digits, '.', '_', '-')", a)
@@ -103,7 +114,7 @@ func Command(cfg Config, action string, args []string) (int, error) {
 		return 1, err
 	}
 	if (action == "token" || action == "token-clear") && s.acct == "" {
-		return 1, errors.New("a stored token needs a named account: use --account NAME (or RCC_ACCOUNT)")
+		return 1, errors.New("a stored token needs an account of its own, not the shared one: drop --account default, or name one with --account NAME")
 	}
 	base := vars("ACCT_DIR", s.acct, "DEFCFG", s.cfg0, "CLAUDE", s.facts["claude"])
 
@@ -113,7 +124,7 @@ func Command(cfg Config, action string, args []string) (int, error) {
 	case "setup-token":
 		code, err := s.interactive(base+setArgs(append([]string{"setup-token"}, args...))+authScript, true)
 		if err == nil && code == 0 && s.acct != "" {
-			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for account %q, run: rcc token --account %s %s\n", s.cfg.Account, s.cfg.Account, s.cfg.Destination)
+			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for account %q, run: %s token --account %s %s\n", s.cfg.Account, Prog, s.cfg.Account, s.cfg.Destination)
 		}
 		return code, err
 	case "token":

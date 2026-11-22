@@ -31,7 +31,7 @@ rcc -p 2222 -i ~/.ssh/key user@B . -- --resume   # ssh 参数，-- 后面的参�
 rcc user@B -- --continue       # 继续这个目录上次的对话（--resume 选择历史对话）
 rcc --profile work user@B      # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
 rcc user@B -- --dangerously-skip-permissions   # B 是 root 时也能用（rcc 会设置 IS_SANDBOX=1，--no-is-sandbox 可关闭）
-rcc --account work user@B      # 使用 B 上的 work 账号（或者设置 RCC_ACCOUNT=work）
+rcc --account work user@B      # 使用 B 上名为 work 的账号（或者设置 RCC_ACCOUNT=work）
 rcc -v ...                     # 显示过程
 ```
 
@@ -48,7 +48,21 @@ rcc token --account ci user@B          # 把令牌存进 ci 账号（隐藏输�
 rcc logout --account work user@B
 ```
 
-每个账号在 B 上有独立的配置目录（凭据、组织策略、对话历史分开），settings、CLAUDE.md、skills、plugins 等个人配置共用。
+**默认情况下，每台本机使用自己专属的账号**，账号名和本机的历史 profile 名相同。所以不同的机器不会共用 Claude 凭据，新机器执行一次 `rcc login <host>` 登录即可。
+`--account NAME` 用于指定一个命名账号，可以让几台机器共用；`--account default` 使用 B 上共用的 `~/.claude`。
+每个账号在 B 上有独立的配置目录（凭据、组织策略、对话历史），settings、CLAUDE.md、skills、plugins 等个人配置共用。
+注意，账号分开只是为了不混用，**不是安全边界**：能 ssh 进容器的人都是容器里的 root。不信任的人请给他单独部署一个容器（`setup-server --name`）。
+
+### 更新
+
+```sh
+rcc update                   # 把本机的 rcc 换成最新 release（会校验 SHA256SUMS；Windows 上也可以替换正在运行的 exe）
+rcc update-server myserver   # 拉取最新服务端镜像，有变化才重建容器；有会话在进行时会拒绝执行，除非加 --force
+```
+
+v0.3.0 之前的版本里没有 `update` 命令，第一次升级到 v0.3.0 需要手动下载。
+
+**命令名**：如果 PATH 里已经有别的 `rcc`（比如 Anaconda / Qt 自带的资源编译器 `rcc.exe`），请把程序命名为 `remote-cc`。rcc 打印的所有提示都会使用你实际调用的名字。
 
 A 上执行的命令会记录到 `~/.cache/rcc/last.log`（Linux；其它平台在对应的用户缓存目录下）。
 
