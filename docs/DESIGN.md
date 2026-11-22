@@ -135,6 +135,19 @@ shim 的职责：
 - **性能**：Glob/Grep 在 sshfs 上遍历大仓库会慢。后续可以加一个 PreToolUse hook，把 Grep/Glob 重定向成经 exec 通道在 A 上跑 `rg`；
   或者直接禁用这两个工具，让 Claude 用 Bash 里的 `rg`，这样就在 A 上本地执行了。
 
+## 告诉 Claude 工具实际作用在哪里
+
+Claude 的系统提示词里有一段环境信息（平台、OS 版本），描述的是 B。如果不另外说明，Claude 会按 B 的系统来写命令，比如在 Windows 或 macOS 的 A 上用 `apt`、GNU 版的 `sed -i`。
+rcc 默认通过 `--append-system-prompt` 追加一段固定的说明（`internal/session/prompt.go`），内容如下：
+- Bash 在哪台机器上执行：A 的 OS 和版本、架构、主机名、shell。
+- 上面那段环境信息描述的是远程主机。
+- 项目目录内的文件工具作用于 A；目录外的路径作用于 B，访问 A 上的其它位置要用 Bash。
+- A 是 Windows 时，补充 Git Bash 的路径写法（`/c/...` ↔ `C:\...`）和 `cmd //c` 的用法。
+
+文本对同一台机器、同一个项目是确定的，不会破坏提示缓存。用户自己传的 `--append-system-prompt` 会接在后面合并；
+如果传了 `--append-system-prompt-file`，或者第一个参数是子命令（`remote-control`、`mcp` 等），rcc 不追加。`--no-prompt` 可以关闭这个功能。
+已实测：Claude 能正确回答命令在哪台机器执行，也知道项目目录外的 Read 读的是远程主机上的文件；用户传的追加提示词同时生效。
+
 ## 对话历史按 A 隔离
 
 Claude Code 在 `~/.claude/projects/<编码后的路径>/` 下按项目路径保存对话（`--resume`/`--continue` 读的就是这里），

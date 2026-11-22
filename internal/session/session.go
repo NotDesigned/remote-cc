@@ -49,6 +49,9 @@ type Config struct {
 	// NoIsSandbox disables exporting IS_SANDBOX=1 for claude when B's user
 	// is root (needed there for --dangerously-skip-permissions).
 	NoIsSandbox bool
+	// NoPrompt disables appending remote-cc's system prompt (which tells
+	// Claude that commands run on this machine, not on the remote host).
+	NoPrompt bool
 	SSH         string // ssh binary, default "ssh"
 }
 
@@ -295,6 +298,12 @@ func (s *session) start() (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	claudeArgs := s.cfg.ClaudeArgs
+	if !s.cfg.NoPrompt {
+		var added bool
+		claudeArgs, added = withSystemPrompt(claudeArgs, systemPrompt(s.remote, ag.Shell()))
+		s.logf("system prompt appended: %v", added)
+	}
 	var l net.Listener
 	var target string
 	if runtime.GOOS == "windows" {
@@ -340,7 +349,7 @@ func (s *session) start() (int, error) {
 	if s.facts["uid"] == "0" && !s.cfg.NoIsSandbox {
 		sandbox = "1"
 	}
-	runCmd := s.sshCmd(true, nil, common+vars("CLAUDE", s.facts["claude"], "SANDBOX", sandbox)+setArgs(s.cfg.ClaudeArgs)+runScript)
+	runCmd := s.sshCmd(true, nil, common+vars("CLAUDE", s.facts["claude"], "SANDBOX", sandbox)+setArgs(claudeArgs)+runScript)
 	runCmd.Stdin, runCmd.Stdout, runCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The tty is in raw mode while ssh runs; keep stray signals from killing
 	// rcc before it can clean up.

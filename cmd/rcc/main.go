@@ -62,6 +62,8 @@ options:
   --no-is-sandbox  do not set IS_SANDBOX=1 for claude when the remote user is
                    root (it is set by default so --dangerously-skip-permissions
                    works there)
+  --no-prompt      do not append remote-cc's system prompt (it tells Claude
+                   that commands run on this machine, not on host)
   --profile NAME   conversation history store on host (default: one per local
                    machine, auto-named; "none" = host's shared ~/.claude)
   ssh options passed through: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER
@@ -97,6 +99,8 @@ func runSession(args []string) int {
 			cfg.Mode = val()
 		case a == "--claude":
 			cfg.ClaudePath = val()
+		case a == "--no-prompt":
+			cfg.NoPrompt = true
 		case a == "--no-is-sandbox":
 			cfg.NoIsSandbox = true
 		case a == "--profile":
