@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"remote-cc/internal/agent"
+	"remote-cc/internal/procjob"
 	"remote-cc/internal/session"
 	"remote-cc/internal/shim"
 )
@@ -32,6 +33,12 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if os.Args[1] != "shim" && os.Args[1] != "version" && os.Args[1] != "--version" {
+		// Whatever rcc starts on this machine (commands, ssh) ends with it.
+		if err := procjob.KillOnExit(); err != nil {
+			fmt.Fprintln(os.Stderr, "rcc: warning: child processes may outlive rcc:", err)
+		}
 	}
 	switch os.Args[1] {
 	case "serve":

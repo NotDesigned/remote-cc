@@ -197,13 +197,18 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 | 断线 | 会话结束 | CLI 在服务端继续运行；设备离线时新命令在入口处最多等 1 分钟；有宽限期，支持换电脑继续 |
 | 历史隔离 | 每台 A 一个 profile，用 bind mount 替换 `projects/` | 服务端按设备加项目分配固定的工作目录 |
 
-**借鉴并已实现**：命令子进程与用户的终端/控制台隔离。
+**借鉴并已实现**：
+- Windows 上用 Job Object（`internal/procjob`）。rcc 启动时把**自己**放进一个带 `KILL_ON_JOB_CLOSE` 的 Job，之后启动的命令、它们的子进程和 ssh 都自动继承这个 Job，不存在逐个加入时的空档。
+  rcc 无论怎么结束（正常退出、关闭控制台窗口、崩溃、被任务管理器结束），内核都会关闭 Job 句柄并结束 Job 里的所有进程。
+  这个句柄不可继承，所以子进程不会让 Job 一直存活。Windows 8 起支持嵌套 Job，即使终端本身已经把 rcc 放在某个 Job 里，也能正常工作。
+  测试：`go test ./internal/procjob/`（仅在 Windows 上运行）。测试会用 TerminateProcess 结束父进程，然后检查孙进程是否在 5 秒内退出。目前只验证到交叉编译通过。
+  Unix 上没有对应实现：命令被 shim 断开时会按进程组结束，但如果 rcc 被 SIGKILL，正在运行的命令会成为孤儿进程继续运行。
+命令子进程与用户的终端/控制台隔离。
 - Unix 上用 `Setsid`，命令没有控制终端。
 - Windows 上用 `CREATE_NO_WINDOW`，命令有自己的隐藏控制台，并且先执行 `chcp.com 65001`，避免中文系统上按 GBK 输出导致乱码。cc-desk-tunnel 的做法是 `chcp.com 65001 >nul & bash -s`，子进程同样不带窗口。
 
 **以后可以借鉴的**：
 - 断线后保持会话：B 上的 claude 放进一个能脱离连接继续运行的 PTY，shim 在 socket 不在时等待一段时间。难点是 slave 模式的 sshfs 会随连接一起断掉。
-- Windows 上用 Job Object，保证 rcc 退出时所有子进程一起结束。
 - 不能用 FUSE 时，可以退回它这种提示词方式。
 
 ## 备选方案（不作为主线）
