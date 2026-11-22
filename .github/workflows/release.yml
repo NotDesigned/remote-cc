@@ -1,0 +1,32 @@
+# Builds rcc for all platforms (with embedded rcc-shim) and attaches the
+# binaries to the GitHub release of the pushed v* tag.
+name: release binaries
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./internal/pathmap ./internal/shim ./internal/session
+      - run: ./scripts/build.sh
+        env:
+          VERSION: ${{ github.ref_name }}
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          gh release upload "$tag" --clobber dist/rcc-* dist/SHA256SUMS dist/THIRD_PARTY_LICENSES.txt dist/LICENSE.txt
