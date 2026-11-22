@@ -202,7 +202,13 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
   rcc 无论怎么结束（正常退出、关闭控制台窗口、崩溃、被任务管理器结束），内核都会关闭 Job 句柄并结束 Job 里的所有进程。
   这个句柄不可继承，所以子进程不会让 Job 一直存活。Windows 8 起支持嵌套 Job，即使终端本身已经把 rcc 放在某个 Job 里，也能正常工作。
   测试：`go test ./internal/procjob/`（仅在 Windows 上运行）。测试会用 TerminateProcess 结束父进程，然后检查孙进程是否在 5 秒内退出。目前只验证到交叉编译通过。
-  Unix 上没有对应实现：命令被 shim 断开时会按进程组结束，但如果 rcc 被 SIGKILL，正在运行的命令会成为孤儿进程继续运行。
+- Unix 上用看门狗进程实现同样的保证（`internal/procjob`）。rcc 启动时派生 `rcc __rcc_guard`：它在独立会话里，忽略 HUP/INT/TERM，通过一条管道和 rcc 相连，写端只有 rcc 持有。
+  rcc 每启动一个命令进程组或一个 ssh 进程，就通过管道登记一次；rcc 的私有临时目录也会登记，cwd 临时文件同样放在这个目录里。
+  rcc 不管以什么方式结束（包括 `kill -9`），内核都会关闭管道。看门狗读到 EOF 后，先对仍然存在的目标发 TERM，1 秒后再发 KILL，然后删除临时目录。
+  发 TERM 让 ssh 有机会把终端从 raw 模式恢复过来。看门狗每 10 秒剔除一次已经消失的目标，避免 PID 被复用后误杀无关进程。
+  测试：`TestCommandsDieWithRcc` 用 `kill -9` 结束 `rcc serve`，检查命令的 shell 及其后台子进程都被结束、看门狗也退出了；关掉看门狗时这个测试会失败。
+  真实会话里也做了 `kill -9` 测试：A 上的后台命令、看门狗、临时目录全部被清理；B 上的 sshfs 和 claude 也都结束了。
+  B 上的 run 目录要等下一次启动时才清理：有 pid 文件且进程已结束的立即清理；没有 pid 文件的（可能有另一个 rcc 正在启动）要超过 2 分钟才清理。
 命令子进程与用户的终端/控制台隔离。
 - Unix 上用 `Setsid`，命令没有控制终端。
 - Windows 上用 `CREATE_NO_WINDOW`，命令有自己的隐藏控制台，并且先执行 `chcp.com 65001`，避免中文系统上按 GBK 输出导致乱码。cc-desk-tunnel 的做法是 `chcp.com 65001 >nul & bash -s`，子进程同样不带窗口。

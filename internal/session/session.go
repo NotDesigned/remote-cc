@@ -33,6 +33,7 @@ import (
 	"remote-cc/internal/embedded"
 	"remote-cc/internal/fsserver"
 	"remote-cc/internal/pathmap"
+	"remote-cc/internal/procjob"
 )
 
 type Config struct {
@@ -105,6 +106,7 @@ func Run(cfg Config) (int, error) {
 		return 1, err
 	}
 	defer os.RemoveAll(s.tmp)
+	procjob.RemoveDirOnExit(s.tmp)
 	if runtime.GOOS != "windows" {
 		// Windows OpenSSH has no connection multiplexing.
 		s.ctl = filepath.Join(s.tmp, "c")
@@ -294,7 +296,7 @@ func (s *session) start() (int, error) {
 	// --- command agent
 	logFile := s.openLog()
 	defer logFile.Close()
-	ag, err := agent.New(agent.Options{Token: token, Logger: log.New(logFile, "", log.LstdFlags)})
+	ag, err := agent.New(agent.Options{Token: token, Logger: log.New(logFile, "", log.LstdFlags), TempDir: s.tmp})
 	if err != nil {
 		return 1, err
 	}
@@ -328,6 +330,7 @@ func (s *session) start() (int, error) {
 	if err := fsCmd.Start(); err != nil {
 		return 1, err
 	}
+	procjob.TrackProcess(fsCmd.Process.Pid)
 	ready := make(chan struct{})
 	fsDone := make(chan error, 1)
 	go func() {
@@ -364,6 +367,8 @@ func (s *session) start() (int, error) {
 	err = runCmd.Start()
 	if err == nil {
 		s.runProc = runCmd.Process
+		// TERM lets ssh restore the terminal from raw mode if rcc dies.
+		procjob.TrackProcess(runCmd.Process.Pid)
 	}
 	s.mu.Unlock()
 	if err != nil {

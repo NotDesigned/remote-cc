@@ -16,6 +16,13 @@ var (
 	err  error
 )
 
+func track(byte, int) {}
+
+func trackDir(string) {}
+
+// RunGuard is only used on Unix.
+func RunGuard() {}
+
 func killOnExit() error {
 	once.Do(func() {
 		// nil security attributes: the handle is not inheritable, so no child

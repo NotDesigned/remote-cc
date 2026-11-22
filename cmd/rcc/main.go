@@ -27,6 +27,10 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == procjob.GuardArg {
+		procjob.RunGuard()
+		return
+	}
 	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == "rcc-shim" {
 		os.Exit(runShim(os.Args[1:]))
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"remote-cc/internal/pathmap"
+	"remote-cc/internal/procjob"
 	"remote-cc/internal/proto"
 )
 
@@ -28,6 +29,9 @@ type Options struct {
 	Shell string
 	// Logger receives one line per command; nil disables logging.
 	Logger *log.Logger
+	// TempDir holds per-command temp files; empty means the system default.
+	// rcc passes its private dir, which is removed even if rcc is killed.
+	TempDir string
 }
 
 type Agent struct {
@@ -120,7 +124,7 @@ func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, er
 
 	var cwdFile string
 	if st.CaptureCwd {
-		tf, err := os.CreateTemp("", "rcc-cwd-")
+		tf, err := os.CreateTemp(a.opt.TempDir, "rcc-cwd-")
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +142,8 @@ func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, er
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// The command leads its own session/process group (pgid == pid).
+	procjob.TrackGroup(cmd.Process.Pid)
 	a.logf("run pid=%d cwd=%s cmd=%s", cmd.Process.Pid, dir, summarize(st.Cmd))
 
 	// Pump frames from the shim: stdin, signals, and disconnects.

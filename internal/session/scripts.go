@@ -61,8 +61,13 @@ umask 077
 for d in "$CACHE"/run/*/; do
   [ -d "$d" ] || continue
   p=$(cat "$d/pid" 2>/dev/null || true)
-  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then continue; fi
-  [ -n "$(find "$d" -maxdepth 0 -mmin +1 2>/dev/null)" ] || continue
+  if [ -n "$p" ]; then
+    # Has a pid: stale exactly when that process is gone.
+    kill -0 "$p" 2>/dev/null && continue
+  else
+    # No pid yet: possibly another rcc still starting; only sweep old ones.
+    [ -n "$(find "$d" -maxdepth 0 -mmin +2 2>/dev/null)" ] || continue
+  fi
   if [ -f "$d/mnt" ]; then fusermount3 -uz "$(cat "$d/mnt")" 2>/dev/null || fusermount -uz "$(cat "$d/mnt")" 2>/dev/null || true; fi
   rm -rf "$d"
 done
