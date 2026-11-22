@@ -122,7 +122,7 @@ options:
                    skills, agents, commands and plugins stay shared via symlinks.
 
 server (Docker):
-  rcc setup-server [--port 2222] [--bind 0.0.0.0] [--data /var/lib/remote-cc]
+  rcc setup-server [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc]
                    [--image IMG] [--key FILE.pub]... [--keys-from-host]
                    [--migrate-history] [--name remote-cc] [--install-docker]
                    [ssh options] user@host
@@ -262,7 +262,7 @@ func runAccountCommand(action string, args []string) int {
 
 // runSetupServer: rcc setup-server [setup flags] [ssh options] [user@]host
 func runSetupServer(args []string) int {
-	sc := session.SetupConfig{Port: 2222, Bind: "0.0.0.0", DataDir: "/var/lib/remote-cc",
+	sc := session.SetupConfig{Port: 2222, Bind: "", DataDir: "/var/lib/remote-cc",
 		InstallDir: "/opt/remote-cc", Image: "ghcr.io/notdesigned/remote-cc-server:latest"}
 	var rest []string
 	for i := 0; i < len(args); i++ {

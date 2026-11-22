@@ -52,7 +52,7 @@ rcc cc           # 在项目目录里使用
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--port N` | 2222 | 容器 sshd 对外的端口（宿主机原有的 22 端口不受影响） |
-| `--bind ADDR` | 0.0.0.0 | 改成 `127.0.0.1` 后不对外开放，只能经 `ProxyJump` 进入 |
+| `--bind ADDR` | 所有地址（IPv4 + IPv6） | 改成 `127.0.0.1` 后不对外开放，只能经 `ProxyJump` 进入 |
 | `--data DIR` | /var/lib/remote-cc | 持久数据：Claude 登录、对话历史、rcc 的账号和 profile、sshd 主机密钥 |
 | `--key FILE.pub` | 自动查找 | 要授权的公钥，可以重复指定 |
 | `--keys-from-host` | 关 | 同时授权宿主机当前用户已经授权的公钥 |

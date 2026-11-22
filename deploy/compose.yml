@@ -10,8 +10,10 @@ services:
     hostname: ${RCC_NAME:-remote-cc}
     restart: unless-stopped
     init: true
+    # RCC_PUBLISH is "PORT:22" (all interfaces, IPv4 and IPv6) or
+    # "ADDR:PORT:22". An explicit 0.0.0.0 would make Docker skip IPv6.
     ports:
-      - "${RCC_BIND:-0.0.0.0}:${RCC_PORT:-2222}:22"
+      - "${RCC_PUBLISH:-2222:22}"
     # sshfs (FUSE) needs the device, CAP_SYS_ADMIN, and Docker's default
     # AppArmor profile lifted (it denies mount). Not --privileged: no host
     # devices or host filesystem are exposed.

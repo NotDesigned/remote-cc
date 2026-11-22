@@ -220,6 +220,9 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 - **`rcc update-server`**：总是先拉取镜像，再比较容器当前的镜像 ID 和新镜像 ID，以及 compose 文件内容。都没变就不碰容器；有变化而容器里还有会话在运行时，拒绝执行（退出码 5），除非 `--force`。
   更新后按 `org.opencontainers.image.source` 标签清理悬空镜像。只有容器 ID 真的变了才报告"已更新"。实测了五种情况：无变化、镜像有更新、只改注释、有活跃会话被拒绝、`--force`。
 - **端口可达性**：setup-server 最后从 A 直接连一次容器端口，连不上时打印 ProxyJump 配置，其中 `HostKeyAlias [host]:port` 是实测确认过的写法。
+- **IPv6**（v0.3.2）：端口映射原来写成 `0.0.0.0:PORT:22`，Docker 遇到显式的 `0.0.0.0` 就只绑定 IPv4，导致只能用 IPv6 访问服务器的客户端连接被拒绝（Windows 报 10061）。
+  现在 `.env` 里写 `RCC_PUBLISH=PORT:22`，不写宿主机地址，Docker 会同时监听 `0.0.0.0` 和 `[::]`；`--bind ADDR` 时写成 `ADDR:PORT:22`。
+  `update-server` 会把旧的 `.env` 迁移成新格式并重建容器。实测：新部署同时监听两种协议，`ssh -6 root@::1` 能连通；旧部署迁移后也能连通；`--bind 127.0.0.1` 仍然只监听回环地址。
 - **命令名**：提示文字使用实际调用的程序名。有用户的 PATH 里有 Anaconda/Qt 的 `rcc.exe`，按我们的提示执行 `rcc cc` 时，运行的是那个程序。
 
 ## 实现选型

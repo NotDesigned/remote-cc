@@ -85,10 +85,12 @@ printf '%s\n' "$keys" | while IFS= read -r k; do
   grep -qxF "$k" "$DATA/root/.ssh/authorized_keys" 2>/dev/null || printf '%s\n' "$k" >> "$DATA/root/.ssh/authorized_keys"
 done
 [ -s "$DATA/root/.ssh/authorized_keys" ] || { echo "rcc: no public key to authorize" >&2; exit 3; }
+case "$BIND" in ""|0.0.0.0|"*") BIND=""; publish="$PORT:22" ;; *) publish="$BIND:$PORT:22" ;; esac
 cat > "$DIR/.env" <<ENV
 RCC_NAME=$NAME
 RCC_PORT=$PORT
 RCC_BIND=$BIND
+RCC_PUBLISH=$publish
 RCC_DATA=$DATA
 RCC_IMAGE=$IMAGE
 ENV
@@ -163,14 +165,14 @@ func Setup(sc SetupConfig) error {
 	fmt.Printf("\nremote-cc server is running: %s\n  host key   %s  (added to your known_hosts, fetched over the verified ssh connection)\n\n",
 		facts["claude"], facts["fingerprint"])
 
-	direct := sc.Bind != "127.0.0.1" && sc.Bind != "localhost" && reachable(host, sc.Port)
+	direct := sc.Bind != "127.0.0.1" && sc.Bind != "localhost" && sc.Bind != "::1" && reachable(host, sc.Port)
 	switch {
 	case direct:
 		fmt.Printf("Port %d is reachable from here. Add this to your ssh config (%s):\n\n"+
 			"  Host cc\n      HostName %s\n      Port %d\n      User root\n      ServerAliveInterval 15\n",
 			sc.Port, sshConfigPath(), host, sc.Port)
 	default:
-		if sc.Bind != "127.0.0.1" && sc.Bind != "localhost" {
+		if sc.Bind != "127.0.0.1" && sc.Bind != "localhost" && sc.Bind != "::1" {
 			fmt.Printf("Port %d on %s is NOT reachable from here (a cloud firewall / security group usually blocks it).\n"+
 				"Either open TCP %d there, or reach the container through the host's own ssh, as below.\n\n", sc.Port, host, sc.Port)
 		}
@@ -213,13 +215,22 @@ cd "$DIR"
 name=$(sed -n 's/^RCC_NAME=//p' .env); name=${name:-remote-cc}
 grep -q '^RCC_NAME=' .env || echo "RCC_NAME=$name" >> .env
 if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
+# .env from rcc <= 0.3.1: derive RCC_PUBLISH; "0.0.0.0" meant all interfaces
+# but kept Docker from listening on IPv6.
+if ! grep -q '^RCC_PUBLISH=' .env; then
+  port=$(sed -n 's/^RCC_PORT=//p' .env); bind=$(sed -n 's/^RCC_BIND=//p' .env)
+  case "$bind" in ""|0.0.0.0) bind=""; publish="${port:-2222}:22" ;; *) publish="$bind:${port:-2222}:22" ;; esac
+  sed -i '/^RCC_BIND=/d' .env; printf 'RCC_BIND=%s\nRCC_PUBLISH=%s\n' "$bind" "$publish" >> .env
+  echo "rcc: port now published on all interfaces (IPv4 and IPv6): $publish" >&2
+  migrated=1
+fi
 image=$(sed -n 's/^RCC_IMAGE=//p' .env)
 echo "before=$(docker exec "$name" claude --version 2>/dev/null | head -1)"
 docker compose pull -q >&2 || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
 new_compose=$(printf '%s' "$COMPOSE_B64" | base64 -d)
 cur=$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)
 latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
-if [ -n "$cur" ] && [ "$cur" = "$latest" ] && [ "$new_compose" = "$(cat compose.yml)" ]; then
+if [ -n "$cur" ] && [ "$cur" = "$latest" ] && [ "$new_compose" = "$(cat compose.yml)" ] && [ -z "${migrated:-}" ]; then
   echo "uptodate=1"
   exit 0
 fi
