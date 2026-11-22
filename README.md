@@ -14,6 +14,11 @@ A (本机，运行 rcc)  ──ssh──►  B (远程，装有 claude)
 
 详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+## 安装
+
+从 [Releases](https://github.com/NotDesigned/remote-cc/releases/latest) 下载对应平台的二进制（`rcc-<os>-<arch>`），放进 PATH 并命名为 `rcc` 或 `remote-cc`。
+B 端不需要单独安装：rcc 每次连接时都会自动上传匹配架构的 `rcc-shim`。
+
 ## 用法
 
 ```sh
@@ -62,3 +67,7 @@ go test ./...             # 包括真实 sshfs 挂载测试（需要 root、sshf
 
 - A：`ssh` 客户端、`bash`（Windows 上是 Git Bash）
 - B：Linux、`claude`、`sshfs`、FUSE；用 root 时还需要 `unshare`/`nsenter`（util-linux）
+
+## 许可证
+
+[MIT](LICENSE)。发布的二进制包含 Go 运行时和若干 BSD 许可证的模块，它们的声明见 release 中的 `THIRD_PARTY_LICENSES.txt`。
