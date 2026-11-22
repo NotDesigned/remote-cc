@@ -4,11 +4,20 @@
 
 ## 一条命令部署（推荐）
 
-宿主机只需要装好 Docker（含 compose 插件），并且有 `/dev/fuse`。在**本机**上执行：
+宿主机需要有 `/dev/fuse`。Docker 可以事先装好（含 compose 插件），也可以加 `--install-docker` 让 rcc 自动安装。在**本机**上执行：
 
 ```sh
 rcc setup-server root@新服务器
+rcc setup-server ubuntu@新服务器                    # 不能用 root 登录、只有一个带 sudo 的账号时
+rcc setup-server --install-docker ubuntu@新服务器   # 全新的机器，还没装 Docker
 ```
+
+**只有 sudo 账号时**：如果登录的用户不是 root，rcc 会自动用 sudo 提权。
+- 免密 sudo（云服务器的 `ubuntu` 账号通常是这样）不需要任何操作。
+- 需要密码时，rcc 会在本机以不回显的方式询问，再通过 stdin 交给 `sudo -S`，密码不会出现在任何命令行或日志里。
+- `--keys-from-host` 和 `--migrate-history` 读的是登录用户自己家目录里的文件，在提权之前就读好。
+
+以后日常连接的是**容器里的** root，由容器自己的 sshd 认证，和宿主机能不能用 root 登录无关。
 
 这条命令会通过 ssh 完成以下步骤：
 - 检查 Docker 和 `/dev/fuse`。
@@ -35,6 +44,8 @@ rcc cc           # 在项目目录里使用
 | `--keys-from-host` | 关 | 同时授权宿主机当前用户已经授权的公钥 |
 | `--migrate-history` | 关 | 从以前在宿主机上直接运行的 rcc 复制对话历史 profile |
 | `--image IMG` | ghcr.io/notdesigned/remote-cc-server:latest | 服务端镜像 |
+| `--name NAME` | remote-cc | 容器名，同一台机器可以按不同名字、端口、数据目录跑多个实例 |
+| `--install-docker` | 关 | 没有 Docker 时，用官方脚本 get.docker.com 安装 |
 
 重复执行 `setup-server` 就是更新：更新配置、拉取镜像、重建容器，数据保留。
 

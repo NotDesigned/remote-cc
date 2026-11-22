@@ -93,9 +93,12 @@ options:
 server (Docker):
   rcc setup-server [--port 2222] [--bind 0.0.0.0] [--data /var/lib/remote-cc]
                    [--image IMG] [--key FILE.pub]... [--keys-from-host]
-                   [--migrate-history] [ssh options] root@host
+                   [--migrate-history] [--name remote-cc] [--install-docker]
+                   [ssh options] user@host
                    install/update the server container on a host with Docker;
-                   authorizes your public key and pins the container's host key
+                   authorizes your public key and pins the container's host key.
+                   user is root or any account with sudo (asks for the sudo
+                   password if needed); --install-docker uses get.docker.com
 
 accounts (run on host, no mount):
   rcc login [--account NAME] [ssh options] host          claude auth login
@@ -243,13 +246,17 @@ func runSetupServer(args []string) int {
 			sc.KeysFromHost = true
 		case "--migrate-history":
 			sc.MigrateHistory = true
+		case "--name":
+			sc.Name = val()
+		case "--install-docker":
+			sc.InstallDocker = true
 		default:
 			rest = append(rest, a)
 		}
 	}
 	cfg, pos, ok := parseArgs(rest)
 	if !ok || len(pos) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: rcc setup-server [--port N] [--bind ADDR] [--data DIR] [--image IMG] [--key FILE.pub]... [--keys-from-host] [--migrate-history] [ssh options] [user@]host")
+		fmt.Fprintln(os.Stderr, "usage: rcc setup-server [--port N] [--bind ADDR] [--data DIR] [--image IMG] [--key FILE.pub]... [--keys-from-host] [--migrate-history] [--name NAME] [--install-docker] [ssh options] [user@]host")
 		return 2
 	}
 	cfg.Destination = pos[0]

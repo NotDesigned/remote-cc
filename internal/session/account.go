@@ -209,6 +209,23 @@ func readSecret(prompt string) (string, error) {
 	return validToken(string(b))
 }
 
+// readPassword reads a password from the terminal (hidden), or one line
+// from stdin when it is not a terminal.
+func readPassword(prompt string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Fprint(os.Stderr, prompt)
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		return string(b), err
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", errors.New("sudo needs a password, but none was given")
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
 func validToken(t string) (string, error) {
 	t = strings.TrimSpace(t)
 	if t == "" || strings.ContainsAny(t, " \t\r\n'\"") {

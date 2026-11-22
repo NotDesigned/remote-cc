@@ -25,11 +25,43 @@ type SetupConfig struct {
 	KeyFiles      []string // public keys (on A) to authorize; default: agent / ~/.ssh/id_*.pub
 	KeysFromHost  bool     // also authorize the host user's own authorized_keys
 	MigrateHistory bool    // copy rcc history profiles from a previous non-docker install
+	Name           string  // container name
+	InstallDocker  bool    // install Docker with get.docker.com if missing
 }
 
+// setupScript runs on the host. As a non-root user it re-runs itself as root
+// via sudo (passwordless, or with the password on stdin), after reading the
+// login user's own files that --keys-from-host / --migrate-history need.
 const setupScript = `
 set -e
-command -v docker >/dev/null || { echo "rcc: docker is not installed on this host (see https://docs.docker.com/engine/install/)" >&2; exit 3; }
+if [ "$(id -u)" != 0 ]; then
+  command -v sudo >/dev/null || { echo "rcc: not logged in as root and sudo is not installed" >&2; exit 3; }
+  host_keys=""
+  if [ "$KEYS_FROM_HOST" = 1 ] && [ -f "$HOME/.ssh/authorized_keys" ]; then
+    host_keys=$(grep -vE '^[[:space:]]*(#|$)' "$HOME/.ssh/authorized_keys" | base64 | tr -d '\n')
+  fi
+  if sudo -n true 2>/dev/null; then
+    set -- sudo -n
+  elif [ "$HAVE_PASS" = 1 ]; then
+    set -- sudo -S -p ""
+  else
+    echo "rcc-needs-sudo-password"
+    exit 10
+  fi
+  exec "$@" env ORIG_HOME="$HOME" HOST_KEYS_B64="$host_keys" sh -c "$(printf %s "$SELF_B64" | base64 -d)"
+fi
+ORIG_HOME=${ORIG_HOME:-$HOME}
+
+if ! command -v docker >/dev/null; then
+  if [ "$INSTALL_DOCKER" = 1 ]; then
+    echo "rcc: installing Docker with the official script (get.docker.com) …" >&2
+    command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl; } >&2
+    curl -fsSL https://get.docker.com | sh >&2
+  else
+    echo "rcc: docker is not installed on this host; rerun with --install-docker, or see https://docs.docker.com/engine/install/" >&2
+    exit 3
+  fi
+fi
 docker compose version >/dev/null 2>&1 || { echo "rcc: the docker compose plugin is missing on this host" >&2; exit 3; }
 [ -e /dev/fuse ] || modprobe fuse 2>/dev/null || true
 [ -e /dev/fuse ] || { echo "rcc: /dev/fuse is missing on this host (the fuse kernel module is required)" >&2; exit 3; }
@@ -38,8 +70,12 @@ umask 077
 mkdir -p "$DIR" "$DATA/root/.ssh" "$DATA/ssh"
 printf '%s' "$COMPOSE_B64" | base64 -d > "$DIR/compose.yml"
 keys=$(printf '%s' "$KEYS_B64" | base64 -d)
-if [ "$KEYS_FROM_HOST" = 1 ] && [ -f "$HOME/.ssh/authorized_keys" ]; then
-  keys=$(printf '%s\n%s\n' "$keys" "$(grep -vE '^\s*(#|$)' "$HOME/.ssh/authorized_keys")")
+if [ "$KEYS_FROM_HOST" = 1 ]; then
+  if [ -n "${HOST_KEYS_B64:-}" ]; then
+    keys=$(printf '%s\n%s\n' "$keys" "$(printf '%s' "$HOST_KEYS_B64" | base64 -d)")
+  elif [ -f "$ORIG_HOME/.ssh/authorized_keys" ]; then
+    keys=$(printf '%s\n%s\n' "$keys" "$(grep -vE '^[[:space:]]*(#|$)' "$ORIG_HOME/.ssh/authorized_keys")")
+  fi
 fi
 # Keys go straight into the volume (not into .env), one per line, deduplicated.
 printf '%s\n' "$keys" | while IFS= read -r k; do
@@ -48,16 +84,17 @@ printf '%s\n' "$keys" | while IFS= read -r k; do
 done
 [ -s "$DATA/root/.ssh/authorized_keys" ] || { echo "rcc: no public key to authorize" >&2; exit 3; }
 cat > "$DIR/.env" <<ENV
+RCC_NAME=$NAME
 RCC_PORT=$PORT
 RCC_BIND=$BIND
 RCC_DATA=$DATA
 RCC_IMAGE=$IMAGE
 ENV
 
-if [ "$MIGRATE" = 1 ] && [ -d "$HOME/.local/share/rcc/profiles" ]; then
-  mkdir -p "$DATA/root/.local/share/rcc"
+if [ "$MIGRATE" = 1 ] && [ -d "$ORIG_HOME/.local/share/rcc/profiles" ]; then
   mkdir -p "$DATA/root/.local/share/rcc/profiles"
-  for p in "$HOME/.local/share/rcc/profiles"/*/; do
+  for p in "$ORIG_HOME/.local/share/rcc/profiles"/*/; do
+    [ -d "$p" ] || continue
     n=$(basename "$p")
     if [ -e "$DATA/root/.local/share/rcc/profiles/$n" ]; then echo "rcc: history profile $n already present, kept" >&2
     else cp -a "$p" "$DATA/root/.local/share/rcc/profiles/$n" && echo "rcc: copied history profile $n" >&2; fi
@@ -67,13 +104,13 @@ fi
 cd "$DIR"
 docker compose up -d --pull missing --quiet-pull >&2
 i=0
-until docker exec remote-cc test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null; do
+until docker exec "$NAME" test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null; do
   i=$((i+1)); [ $i -gt 60 ] && { docker compose logs --tail 30 >&2; echo "rcc: container did not come up" >&2; exit 4; }
   sleep 1
 done
-echo "hostkey=$(docker exec remote-cc cat /etc/ssh/keys/ssh_host_ed25519_key.pub | awk '{print $1" "$2}')"
-echo "fingerprint=$(docker exec remote-cc ssh-keygen -lf /etc/ssh/keys/ssh_host_ed25519_key.pub | awk '{print $2}')"
-echo "claude=$(docker exec remote-cc claude --version 2>/dev/null | head -1)"
+echo "hostkey=$(docker exec "$NAME" cat /etc/ssh/keys/ssh_host_ed25519_key.pub | awk '{print $1" "$2}')"
+echo "fingerprint=$(docker exec "$NAME" ssh-keygen -lf /etc/ssh/keys/ssh_host_ed25519_key.pub | awk '{print $2}')"
+echo "claude=$(docker exec "$NAME" claude --version 2>/dev/null | head -1)"
 `
 
 // Setup installs or updates the server container on a host.
@@ -91,23 +128,46 @@ func Setup(sc SetupConfig) error {
 	}
 	defer cleanup()
 
-	b64 := func(x string) string { return base64Std(x) }
-	script := vars(
+	if sc.Name == "" {
+		sc.Name = "remote-cc"
+	}
+	if !validProfile(sc.Name) {
+		return fmt.Errorf("invalid container name %q", sc.Name)
+	}
+	params := vars(
 		"DIR", sc.InstallDir, "DATA", sc.DataDir, "PORT", strconv.Itoa(sc.Port), "BIND", sc.Bind, "IMAGE", sc.Image,
-		"COMPOSE_B64", b64(deploy.Compose), "KEYS_B64", b64(strings.Join(keys, "\n")),
+		"NAME", sc.Name, "COMPOSE_B64", base64Std(deploy.Compose), "KEYS_B64", base64Std(strings.Join(keys, "\n")),
 		"KEYS_FROM_HOST", boolStr(sc.KeysFromHost), "MIGRATE", boolStr(sc.MigrateHistory),
-	) + setupScript
-	c := s.sshCmd(false, nil, script)
-	c.Stderr = os.Stderr
+		"INSTALL_DOCKER", boolStr(sc.InstallDocker),
+	)
+	// The script embeds itself (as root it skips the sudo step) so it can
+	// re-run under sudo with the same parameters.
+	inner := params + setupScript
+	run := func(password string) ([]byte, error) {
+		script := params + vars("SELF_B64", base64Std(inner), "HAVE_PASS", boolStr(password != "")) + setupScript
+		c := s.sshCmd(false, nil, script)
+		c.Stderr = os.Stderr
+		if password != "" {
+			c.Stdin = strings.NewReader(password + "\n")
+		}
+		return c.Output()
+	}
 	fmt.Fprintf(os.Stderr, "rcc: installing remote-cc server on %s (port %d, data %s) …\n", sc.Destination, sc.Port, sc.DataDir)
-	out, err := c.Output()
+	out, err := run("")
+	if bytes.Contains(out, []byte("rcc-needs-sudo-password")) {
+		pw, perr := readPassword(fmt.Sprintf("[sudo] password for %s: ", sc.Destination))
+		if perr != nil {
+			return perr
+		}
+		out, err = run(pw)
+	}
 	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
 	}
 	facts := map[string]string{}
 	sc2 := bufio.NewScanner(bytes.NewReader(out))
 	for sc2.Scan() {
-		if k, v, ok := strings.Cut(sc2.Text(), "="); ok {
+		if k, v, ok := strings.Cut(sc2.Text(), "="); ok && k != "" {
 			facts[k] = v
 		}
 	}

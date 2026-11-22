@@ -6,8 +6,8 @@ services:
       context: .
       args:
         CLAUDE_VERSION: ${CLAUDE_VERSION:-stable}
-    container_name: remote-cc
-    hostname: remote-cc
+    container_name: ${RCC_NAME:-remote-cc}
+    hostname: ${RCC_NAME:-remote-cc}
     restart: unless-stopped
     init: true
     ports:
