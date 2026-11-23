@@ -64,7 +64,7 @@ func main() {
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		os.Exit(runAccountCommand(os.Args[1], os.Args[2:]))
 	case "version", "--version":
-		fmt.Println("rcc", version)
+		fmt.Println(prog(), version)
 		if len(os.Args) > 2 && os.Args[2] == "--check" {
 			if tag, err := update.Latest(); err == nil {
 				fmt.Printf("latest release: %s%s\n", tag, map[bool]string{true: "  (run: " + prog() + " update)", false: ""}[update.Newer(tag, version)])

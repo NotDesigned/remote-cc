@@ -7,9 +7,9 @@
 宿主机需要有 `/dev/fuse`。Docker 可以事先装好（含 compose 插件），也可以加 `--install-docker` 让 rcc 自动安装。在**本机**上执行：
 
 ```sh
-rcc setup-server root@新服务器
-rcc setup-server ubuntu@新服务器                    # 不能用 root 登录、只有一个带 sudo 的账号时
-rcc setup-server --install-docker ubuntu@新服务器   # 全新的机器，还没装 Docker
+remote-cc setup-server root@新服务器
+remote-cc setup-server ubuntu@新服务器                    # 不能用 root 登录、只有一个带 sudo 的账号时
+remote-cc setup-server --install-docker ubuntu@新服务器   # 全新的机器，还没装 Docker
 ```
 
 **只有 sudo 账号时**：如果登录的用户不是 root，rcc 会自动用 sudo 提权。
@@ -43,8 +43,8 @@ rcc setup-server --install-docker ubuntu@新服务器   # 全新的机器，还�
 按提示操作：
 
 ```sh
-rcc login cc     # 在容器里登录 Claude（每个账号一次）
-rcc cc           # 在项目目录里使用
+remote-cc login cc     # 在容器里登录 Claude（每个账号一次）
+remote-cc cc           # 在项目目录里使用
 ```
 
 常用参数：
@@ -61,11 +61,11 @@ rcc cc           # 在项目目录里使用
 | `--name NAME` | remote-cc | 容器名，同一台机器可以按不同名字、端口、数据目录跑多个实例 |
 | `--install-docker` | 关 | 没有 Docker 时，用官方脚本 get.docker.com 安装 |
 
-**更新**：`rcc update-server user@host` 会拉取最新镜像（包含新版 Claude Code），只有镜像或 compose 配置变化时才重建容器，数据、公钥和端口都保留。
+**更新**：`remote-cc update-server user@host` 会拉取最新镜像（包含新版 Claude Code），只有镜像或 compose 配置变化时才重建容器，数据、公钥和端口都保留。
 如果有会话正在进行，它会拒绝执行并说明原因，加 `--force` 可以强制更新。更新后会清理被替换掉的旧 remote-cc 镜像，只删除带本项目标签的悬空镜像。
 重复执行 `setup-server` 也可以，但它不会主动拉取更新的镜像。
 
-**移除**：`rcc remove-server user@host` 会停止并删除容器、镜像和 `/opt/remote-cc`，同时删除本机 `known_hosts` 里的对应条目。数据目录默认保留，加 `--purge` 才会一起删除，里面包括 Claude 登录、对话历史和主机密钥。和 setup-server 一样支持 sudo 账号。
+**移除**：`remote-cc remove-server user@host` 会停止并删除容器、镜像和 `/opt/remote-cc`，同时删除本机 `known_hosts` 里的对应条目。数据目录默认保留，加 `--purge` 才会一起删除，里面包括 Claude 登录、对话历史和主机密钥。和 setup-server 一样支持 sudo 账号。
 
 **客户端配置**：A 连的是**容器**，不是宿主机。`Port` 要写容器的端口（默认 2222），`User` 写 `root`（容器里的 root）：
 
@@ -79,7 +79,7 @@ Host cc
 
 用 `ssh cc hostname` 检查，输出 `remote-cc` 就说明连对了。宿主机上不需要安装 Claude Code。
 
-**换服务器**：在新服务器上执行一次 `rcc setup-server`。如果要带走历史和登录，把旧服务器上的 `/var/lib/remote-cc` 复制到新服务器的同一位置，再执行 `setup-server`。
+**换服务器**：在新服务器上执行一次 `remote-cc setup-server`。如果要带走历史和登录，把旧服务器上的 `/var/lib/remote-cc` 复制到新服务器的同一位置，再执行 `setup-server`。
 
 ## 手动部署
 
