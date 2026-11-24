@@ -7,6 +7,7 @@ echo "port=$PORT"
 for d in users/*/; do
   if [ -d "$d" ]; then (cd "$d" && docker compose down >&2); fi
 done
+if [ -d egress ]; then (cd egress && docker compose down >&2); fi
 docker compose down --rmi all >&2 || docker compose down >&2
 docker network rm "$NET" >/dev/null 2>&1 || true
 cd / && rm -rf "$DIR"

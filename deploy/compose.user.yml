@@ -20,6 +20,8 @@ services:
       # only change their own key file, and key options there can only
       # narrow the gateway's rules.
       - ${RCC_KEYS}:/etc/remote-cc/userkeys
+      # This user's socket to the egress host (server egress); empty without one.
+      - ${RCC_EGRESS_DIR:-/var/lib/remote-cc/egress/none}:/run/rcc-egress
     networks:
       - remote-cc
 networks:

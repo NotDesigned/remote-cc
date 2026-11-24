@@ -19,8 +19,10 @@ RCC_DATA=$u
 RCC_KEYS=$k
 RCC_IMAGE=$IMAGE
 RCC_NETWORK=$NET
+RCC_EGRESS_DIR=$DATA/egress/users/$NAME
 COMPOSE_PROJECT_NAME=rcc-$NAME
 ENV
+mkdir -p "$DATA/egress/users/$NAME"
 # rcc <= 0.4.0 ran user containers under the project name "NAME": recreate.
 proj=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "rcc-$NAME" 2>/dev/null || true)
 if [ -n "$proj" ] && [ "$proj" != "rcc-$NAME" ]; then docker rm -f "rcc-$NAME" >/dev/null; fi

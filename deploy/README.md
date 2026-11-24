@@ -110,3 +110,35 @@ remote-cc server migrate --user owner root@服务器
 
 镜像由 GitHub Actions 在推送 `v*` 标签时构建，包括 amd64 和 arm64 两个版本（`.github/workflows/image.yml`）。也可以在 Actions 页面手动运行，指定要打包的 Claude Code 版本。
 本地构建：`docker build deploy`。注意会临时占用约 2GB 的构建缓存，磁盘紧张的机器不要在本地构建。
+
+## 经 remote-claude-browser 的节点出网（可选）
+
+[remote-claude-browser](https://github.com/NotDesigned/remote-claude-browser)（下称 RCB）的每个浏览器配置绑定一个 Claude 账号和一个代理节点。部署**出口主机**后，`remote-cc --rcb 配置` 启动的 Claude Code 使用该配置对应的 Claude 账号，并且**全部网络流量**都经该配置的节点出去，和网页版是同一个出口。RCB 可以和 remote-cc 装在同一台机器上，也可以分开部署，两边只通过 HTTPS 接口联系。
+
+```
+RCB：配置（Claude 账号、节点、出口、时区）、节点目录
+  ▲ 主机令牌（同步节点）           ▲ 客户端令牌（读配置）
+  │                                 │
+rcc-egress 容器 ── 每个用户一个 socket ──► rcc-<用户> 容器      你的电脑
+  每个节点一个网络命名空间                    claude 进入节点的命名空间后启动   remote-cc --rcb 配置
+```
+
+**原理**：`rcc-egress` 为每个节点建一个网络命名空间，里面唯一的默认路由是连到该节点的 Mihomo TUN。只有 Mihomo 自己的连接（带路由标记）能用通往外网的 veth，防火墙拒绝其他一切；Mihomo 停止时命名空间没有任何出口，不会退回直连。DNS 由 TUN 接管，经节点解析；IPv6 只允许 Mihomo 自己使用。会话开始时，`rcc-shim` 从该用户自己的 socket 取得命名空间（文件描述符），进入后先经节点查询出口 IP，必须等于 RCB 记录的出口，并核对 Claude 登录邮箱与配置一致，然后才启动 claude。所以不依赖 `HTTPS_PROXY`：claude、它启动的 MCP 服务器、WebFetch、遥测都只能经节点出网。Bash 工具的命令和文件照常在你的电脑上执行。
+
+**部署**（在 RCB 的「代理与 API → remote-cc」里分别生成两种令牌）：
+
+```sh
+remote-cc server egress --rcb https://browser.example.com root@服务器   # 粘贴主机令牌（rcch_…）
+remote-cc update-server root@服务器                                     # 已有用户的容器加上 socket 挂载
+remote-cc rcb login https://browser.example.com                         # 在你的电脑上，粘贴客户端令牌（rcck_…）
+remote-cc rcb profiles                                                  # 看看有哪些配置
+remote-cc login --rcb 配置 服务器-cc   # 在该配置的远程浏览器里打开登录链接，把授权码贴回来
+remote-cc --rcb 配置 服务器-cc         # 开始使用
+```
+
+- 主机令牌能读到令牌所属 RCB 用户可用节点的完整配置（含凭据），只交给你自己的服务器；它保存在 `<安装目录>/egress/token`（0600），经 stdin 传入，不出现在命令行里。
+- 节点列表每 5 分钟同步一次并缓存在 `<数据目录>/egress/state`，RCB 暂时不可达时继续使用缓存。节点在 RCB 里被修改或删除后，对应的命名空间会停止，正在使用它的会话断网，需要重新启动。
+- 配置的账号固定为 `rcb-<配置 id>`，凭据跟配置走，几台电脑共用同一份登录。这些账号只能通过 `--rcb` 使用（`--account rcb-…` 会被拒绝），`accounts` 也不会在节点之外查询它们。
+- 出口 IP 由节点服务器决定。例如节点服务器优先用 IPv6 时，出口就是它的 IPv6 地址，与 RCB 浏览器一致。
+- 第一版的权限：同一台服务器上的所有 remote-cc 用户，都能使用主机令牌所属 RCB 用户的节点。服务器只给自己用时没有问题；多人共用时，按 RCB 用户分别部署实例（`--name`），或等待按用户授权。
+- 宿主机需要 `/dev/net/tun`；容器使用 `NET_ADMIN`、`SYS_ADMIN`，不使用 `--privileged`。

@@ -123,12 +123,23 @@ func (c *Conn) Elevated(params, body string) (map[string]string, error) {
 
 // ElevatedOutput is Elevated returning the raw output.
 func (c *Conn) ElevatedOutput(params, body string) ([]byte, error) {
+	return c.ElevatedInput(params, body, "")
+}
+
+// ElevatedInput is ElevatedOutput with input on the script's stdin, for
+// secrets that must not appear in a command line. sudo -S reads only the
+// password line, so the script sees just input either way.
+func (c *Conn) ElevatedInput(params, body, input string) ([]byte, error) {
 	inner := params + body
 	run := func(password string) ([]byte, error) {
 		cmd := c.Script(false, nil, params+Vars("SELF_B64", Base64(inner), "HAVE_PASS", boolStr(password != ""))+body)
 		cmd.Stderr = os.Stderr
+		stdin := input
 		if password != "" {
-			cmd.Stdin = strings.NewReader(password + "\n")
+			stdin = password + "\n" + input
+		}
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
 		}
 		return cmd.Output()
 	}

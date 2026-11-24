@@ -36,6 +36,8 @@ for n in $users; do
   printf '%s\n' "$user_new" > "users/$n/compose.yml"
   grep -q '^COMPOSE_PROJECT_NAME=' "users/$n/.env" || echo "COMPOSE_PROJECT_NAME=rcc-$n" >> "users/$n/.env"
   grep -q '^RCC_NETWORK=' "users/$n/.env" || echo "RCC_NETWORK=$NET" >> "users/$n/.env"
+  grep -q '^RCC_EGRESS_DIR=' "users/$n/.env" || echo "RCC_EGRESS_DIR=$DATA/egress/users/$n" >> "users/$n/.env"
+  mkdir -p "$DATA/egress/users/$n"
   p=$(project "rcc-$n")
   if [ -n "$p" ] && [ "$p" != "rcc-$n" ]; then docker rm -f "rcc-$n" >/dev/null; fi   # rcc <= 0.4.0 project name
   (cd "users/$n" && docker compose up -d >&2)

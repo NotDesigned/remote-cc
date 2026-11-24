@@ -107,6 +107,10 @@ remote-cc -v cc                      # 显示过程；-vv / -vvv / -vvvv 同时�
 
 A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Windows 是 `%LOCALAPPDATA%\rcc\last.log`，macOS 是 `~/Library/Caches/rcc/last.log`。
 
+### 以浏览器配置的身份运行（remote-claude-browser）
+
+和 [remote-claude-browser](https://github.com/NotDesigned/remote-claude-browser) 联动后，`remote-cc --rcb 配置 服务器-cc` 使用该浏览器配置的 Claude 账号，Claude Code 的全部网络流量经该配置的代理节点出去，与网页版同一个出口和时区。需要在服务器上部署出口主机（`server egress`），并在本机执行 `rcb login`，见 [deploy/README.md](deploy/README.md#经-remote-claude-browser-的节点出网可选)。
+
 ### 账号
 
 **默认情况下，每台本机使用自己专属的 Claude 账号**，账号名和本机的历史 profile 名相同。所以不同的机器不会共用 Claude 凭据，新机器执行一次 `remote-cc login cc` 登录即可。

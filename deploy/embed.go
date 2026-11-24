@@ -9,3 +9,6 @@ var ComposeGateway string
 
 //go:embed compose.user.yml
 var ComposeUser string
+
+//go:embed compose.egress.yml
+var ComposeEgress string

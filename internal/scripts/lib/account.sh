@@ -15,6 +15,20 @@ account_prep() {
   done
 }
 
+# rcb_guard: a remote-claude-browser profile's account (rcb-*) is used only
+# inside its node's namespace (RCB_NODE), never with this container's network.
+rcb_guard() {
+  case "${ACCT_DIR##*/}" in
+    rcb-*) [ -n "${RCB_NODE:-}" ] || { echo "rcc: account ${ACCT_DIR##*/} belongs to a remote-claude-browser profile; use --rcb" >&2; exit 2; } ;;
+  esac
+}
+
+# rcb_env: parameters for rcc-shim's netexec stages (internal/netexec).
+rcb_env() {
+  export RCC_EGRESS_NODE="$RCB_NODE" RCC_EGRESS_RESOLV="$1" RCC_EGRESS_EXPECT_IP="${RCB_EXPECT_IP:-}" \
+    RCC_EGRESS_TZ="${RCB_TZ:-}" RCC_EGRESS_EMAIL="${RCB_EMAIL:-}" RCC_EGRESS_LABEL="${RCB_LABEL:-}"
+}
+
 # account_env: select the account for claude processes started afterwards.
 account_env() {
   [ -n "$ACCT_DIR" ] || return 0

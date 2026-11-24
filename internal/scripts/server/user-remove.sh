@@ -11,7 +11,7 @@ fi
 # Revoke first: gateway account, keys, pending invites.
 sed -i "/^$NAME\$/d" "$DATA/gateway/etc/users"
 docker exec "$GW" rcc-gateway-sync >&2 || true
-rm -rf "$DATA/keys/$NAME" "$DATA/keys/$NAME.invites" "$DATA/invites/$NAME"
+rm -rf "$DATA/keys/$NAME" "$DATA/keys/$NAME.invites" "$DATA/invites/$NAME" "$DATA/egress/users/$NAME"
 if [ -d "$DIR/users/$NAME" ]; then (cd "$DIR/users/$NAME" && docker compose down >&2); rm -rf "$DIR/users/$NAME"; fi
 if [ "$PURGE" = 1 ]; then
   rm -rf "$DATA/users/$NAME"; echo "rcc: deleted $NAME's data (Claude logins, history)" >&2

@@ -6,8 +6,10 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -412,4 +414,50 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// Egress installs or updates the egress host: Claude Code sessions started
+// with --rcb then run in the network namespace of their browser profile's
+// proxy node, synced from remote-claude-browser at rcbURL with a host token
+// (asked for here, or RCC_EGRESS_TOKEN). image "" = the published one.
+func Egress(c Config, rcbURL, image string) error {
+	u, err := url.Parse(rcbURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return errors.New("--rcb needs the remote-claude-browser address, e.g. https://browser.example.com")
+	}
+	token := strings.TrimSpace(os.Getenv("RCC_EGRESS_TOKEN"))
+	if token == "" {
+		token, err = remote.ReadPassword("host token (remote-claude-browser: 代理与 API → remote-cc → 出口主机): ")
+		if err != nil {
+			return err
+		}
+		token = strings.TrimSpace(token)
+	}
+	if !strings.HasPrefix(token, "rcch_") {
+		return errors.New("that is not a host token (they start with rcch_)")
+	}
+	conn, err := c.open()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	fmt.Fprintf(os.Stderr, "rcc: installing the egress host on %s …\n", c.Dest)
+	out, err := conn.ElevatedInput(remote.Vars("DIR", c.InstallDir, "URL", strings.TrimRight(u.String(), "/"),
+		"EIMAGE", image, "COMPOSE_B64", remote.Base64(deploy.ComposeEgress)), scripts.Host("server/egress.sh"), token+"\n")
+	if err != nil {
+		return fmt.Errorf("egress setup failed: %w", err)
+	}
+	f := remote.ParseFacts(out)
+	switch sync := f["sync"]; {
+	case strings.Contains(sync, "synced"):
+		fmt.Printf("egress host is running: %s\n", sync[strings.Index(sync, "synced"):])
+	case sync != "":
+		fmt.Printf("egress host is running, but the first sync failed:\n  %s\n", sync)
+	default:
+		fmt.Println("egress host is running (no sync result yet; see: docker logs " + c.Name + "-egress)")
+	}
+	if m := strings.TrimSpace(f["missing"]); m != "" {
+		fmt.Printf("these users' containers need the new mount: %s\n  run: %s update-server %s\n", m, remote.Prog, c.Dest)
+	}
+	return nil
 }

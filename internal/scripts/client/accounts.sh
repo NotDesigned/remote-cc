@@ -6,6 +6,8 @@ echo "acct=default||$(status)"
 for d in "$ACCTS"/*/; do
   [ -d "$d" ] || continue
   dir=${d%/}; tok=""
+  # Profile accounts are queried only through their node (--rcb).
+  case "${dir##*/}" in rcb-*) echo "acct=$(basename "$dir")||rcb"; continue ;; esac
   if [ -s "$dir/.rcc-oauth-token" ]; then
     tok=yes
     s=$(CLAUDE_CONFIG_DIR="$dir" CLAUDE_CODE_OAUTH_TOKEN=$(cat "$dir/.rcc-oauth-token") status)

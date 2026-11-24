@@ -36,6 +36,7 @@ import (
 	"remote-cc/internal/fsserver"
 	"remote-cc/internal/pathmap"
 	"remote-cc/internal/procjob"
+	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/scripts"
 )
@@ -54,6 +55,24 @@ type Config struct {
 	Account     string
 	NoIsSandbox bool // do not set IS_SANDBOX=1 for claude as root
 	NoPrompt    bool // do not append remote-cc's system prompt
+	// RCB runs claude as this remote-claude-browser profile: its account
+	// (rcb-<id>) and, inside the egress host's namespace, its proxy node.
+	RCB *rcb.Profile
+}
+
+// rcbVars are the run/auth script parameters for a profile ("" without one).
+func rcbVars(p *rcb.Profile, checkEmail bool) string {
+	if p == nil || p.Node == nil {
+		return ""
+	}
+	ip, tz, email := "", "", ""
+	if p.Exit != nil {
+		ip, tz = p.Exit.IP, p.Exit.TimeZone
+	}
+	if checkEmail && p.SignedIn {
+		email = p.Email
+	}
+	return remote.Vars("RCB_NODE", p.Node.ID, "RCB_EXPECT_IP", ip, "RCB_TZ", tz, "RCB_EMAIL", email, "RCB_LABEL", p.Name)
 }
 
 type session struct {
@@ -278,7 +297,7 @@ func (s *session) start() (int, error) {
 	// Claude Code, interactive.
 	sandbox := s.facts["uid"] == "0" && !s.cfg.NoIsSandbox
 	run := s.conn.Script(true, nil, common+remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox))+
-		remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
+		rcbVars(s.cfg.RCB, true)+remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
 	run.Stdin, run.Stdout, run.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The tty is in raw mode while ssh runs; keep stray signals from killing
 	// rcc before it can clean up.

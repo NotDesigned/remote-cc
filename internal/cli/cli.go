@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"remote-cc/internal/agent"
 	"remote-cc/internal/client"
 	"remote-cc/internal/procjob"
+	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/server"
 	"remote-cc/internal/shim"
@@ -27,6 +29,8 @@ const usageText = `usage:
       -v, -vv, -vvv, -vvvv   verbose; extra v's make ssh verbose too
       --account NAME         Claude login: default this machine's own; "default" = shared
       --profile NAME         history: default this machine's own; "none" = the account's
+      --rcb PROFILE          run as a remote-claude-browser profile: its Claude account,
+                             all traffic through its proxy node (needs rcb login, server egress)
       --claude PATH  --no-prompt  --no-is-sandbox
       ssh options: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER -4 -6 -A -C -q
 
@@ -35,7 +39,8 @@ on your machine:
   rcc device invite [--ttl 24h] HOST          invite another machine of yours
   rcc device list HOST                        your devices and pending invites
   rcc device remove [--force] HOST DEVICE     remove a device (key comment or fingerprint)
-  rcc login|logout|status|setup-token [--account NAME] HOST
+  rcc login|logout|status|setup-token [--account NAME | --rcb PROFILE] HOST
+  rcc rcb login URL | profiles | logout   link this machine to remote-claude-browser
   rcc token [--account NAME] [--clear] HOST   store a setup-token for an account
   rcc accounts HOST
   rcc update [--check] [--version vX.Y.Z]     replace this program with a release
@@ -52,6 +57,7 @@ servers (run as root or with sudo on the Docker host):
   rcc remove-server [--purge] [server options] user@host
   rcc server init [server options] user@host                 gateway only
   rcc server migrate --user NAME [--force] user@host           convert a 0.3/0.4 single-container server
+  rcc server egress --rcb URL [--image IMG] user@host          egress host for --rcb sessions (asks for a host token)
       server options: --install-dir DIR --data DIR --image IMG --public-host NAME --name INSTANCE
 
   rcc serve [--listen ADDR] [--token T] [--shell PATH]   the command agent alone (debugging)
@@ -104,6 +110,8 @@ func Main(args []string, version string) int {
 		return runDevice(rest)
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		return runAccount(cmd, rest)
+	case "rcb":
+		return runRCB(rest)
 	case "setup-server", "update-server", "remove-server", "server", "user":
 		return runServer(cmd, rest)
 	}
@@ -193,8 +201,9 @@ func parse(args []string, f flags) (t remote.Target, pos, after []string, err er
 
 func runSession(args []string) int {
 	var c client.Config
+	var rcbSel string
 	t, pos, after, err := parse(args, flags{
-		str:   map[string]*string{"--claude": &c.ClaudePath, "--profile": &c.Profile, "--account": &c.Account},
+		str:   map[string]*string{"--claude": &c.ClaudePath, "--profile": &c.Profile, "--account": &c.Account, "--rcb": &rcbSel},
 		bools: map[string]*bool{"--no-prompt": &c.NoPrompt, "--no-is-sandbox": &c.NoIsSandbox},
 	})
 	if err != nil || len(pos) < 1 || len(pos) > 2 {
@@ -207,6 +216,9 @@ func runSession(args []string) int {
 	if c.Account == "" {
 		c.Account = os.Getenv("RCC_ACCOUNT")
 	}
+	if c.RCB, err = rcbProfile(rcbSel); err != nil {
+		return fail(err)
+	}
 	t.Dest = pos[0]
 	c.Target, c.ClaudeArgs, c.Dir = t, after, "."
 	if len(pos) == 2 {
@@ -218,8 +230,9 @@ func runSession(args []string) int {
 func runAccount(action string, args []string) int {
 	var c client.Config
 	var clear bool
+	var rcbSel string
 	t, pos, after, err := parse(args, flags{
-		str:   map[string]*string{"--account": &c.Account, "--claude": &c.ClaudePath},
+		str:   map[string]*string{"--account": &c.Account, "--claude": &c.ClaudePath, "--rcb": &rcbSel},
 		bools: map[string]*bool{"--clear": &clear},
 	})
 	if err != nil || len(pos) != 1 {
@@ -228,6 +241,12 @@ func runAccount(action string, args []string) int {
 	}
 	if c.Account == "" {
 		c.Account = os.Getenv("RCC_ACCOUNT")
+	}
+	if rcbSel != "" && action == "accounts" {
+		return fail(errors.New("accounts lists every account; --rcb does not apply"))
+	}
+	if c.RCB, err = rcbProfile(rcbSel); err != nil {
+		return fail(err)
 	}
 	if action == "token" && (clear || (len(after) > 0 && after[0] == "--clear")) {
 		action = "token-clear"
@@ -292,12 +311,13 @@ func runServer(cmd string, args []string) int {
 		sub, args = args[0], args[1:]
 	}
 	var c server.Config
-	var port, user, alias, ttl, image string
+	var port, user, alias, ttl, image, rcbURL string
 	var keys []string
 	var purge, force bool
 	t, pos, _, err := parse(args, flags{
 		str: map[string]*string{"--install-dir": &c.InstallDir, "--data": &c.DataDir, "--port": &port, "--bind": &c.Bind,
-			"--image": &image, "--public-host": &c.PublicHost, "--name": &c.Name, "--user": &user, "--alias": &alias, "--ttl": &ttl},
+			"--image": &image, "--public-host": &c.PublicHost, "--name": &c.Name, "--user": &user, "--alias": &alias, "--ttl": &ttl,
+			"--rcb": &rcbURL},
 		list:  map[string]*[]string{"--key": &keys},
 		bools: map[string]*bool{"--install-docker": &c.InstallDocker, "--purge": &purge, "--force": &force},
 	})
@@ -342,6 +362,11 @@ func runServer(cmd string, args []string) int {
 		return fail(server.Remove(c, purge))
 	case cmd == "server" && sub == "init" && need(1):
 		return fail(server.Init(c))
+	case cmd == "server" && sub == "egress" && need(1):
+		if rcbURL == "" {
+			return fail(errors.New("server egress needs --rcb URL (your remote-claude-browser)"))
+		}
+		return fail(server.Egress(c, rcbURL, image))
 	case cmd == "server" && sub == "migrate" && need(1):
 		if user == "" {
 			return fail(errors.New("server migrate needs --user NAME (the name the current owner gets)"))
@@ -437,4 +462,105 @@ func runServe(args []string) int {
 	fmt.Fprintf(os.Stderr, "rcc: agent listening on %s (shell %s)\n", l.Addr(), a.Shell())
 	fmt.Fprintf(os.Stderr, "rcc: on the server: export RCC_SOCK=<forwarded socket> RCC_TOKEN=%s CLAUDE_CODE_SHELL_PREFIX=<path to rcc-shim>\n", token)
 	return fail(a.Serve(l))
+}
+
+// rcbProfile resolves --rcb against the linked remote-claude-browser.
+func rcbProfile(sel string) (*rcb.Profile, error) {
+	if sel == "" {
+		return nil, nil
+	}
+	l, err := rcb.Load()
+	if err != nil {
+		return nil, err
+	}
+	ps, err := rcb.Profiles(l)
+	if err != nil {
+		return nil, err
+	}
+	p, err := rcb.Find(ps, sel)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Usable(); err != nil {
+		return nil, err
+	}
+	exit := "exit not checked yet"
+	if p.Exit != nil {
+		exit = "exit " + p.Exit.IP
+		if p.Exit.TimeZone != "" {
+			exit += ", " + p.Exit.TimeZone
+		}
+	}
+	fmt.Fprintf(os.Stderr, "rcc: profile %s → node %s (%s)\n", p.Label(), p.Node.Name, exit)
+	return &p, nil
+}
+
+func runRCB(args []string) int {
+	usage := func() int {
+		fmt.Fprintf(os.Stderr, "usage:\n  %[1]s rcb login URL     link this machine (asks for a client token)\n  %[1]s rcb profiles      your browser profiles\n  %[1]s rcb logout        forget the link\n", remote.Prog)
+		return 2
+	}
+	if len(args) == 0 {
+		return usage()
+	}
+	switch {
+	case args[0] == "login" && len(args) == 2:
+		u, err := rcb.NormalizeURL(args[1])
+		if err != nil {
+			return fail(err)
+		}
+		tok := strings.TrimSpace(os.Getenv("RCC_RCB_TOKEN"))
+		if tok == "" {
+			if tok, err = remote.ReadPassword("client token (remote-claude-browser: 代理与 API → remote-cc → 电脑上的 remote-cc): "); err != nil {
+				return fail(err)
+			}
+			tok = strings.TrimSpace(tok)
+		}
+		if !strings.HasPrefix(tok, "rcck_") {
+			return fail(errors.New("that is not a client token (they start with rcck_)"))
+		}
+		l := rcb.Link{URL: u, Token: tok}
+		ps, err := rcb.Profiles(l)
+		if err != nil {
+			return fail(err)
+		}
+		if err := rcb.Save(l); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("linked to %s: %d profile(s)\n  %s rcb profiles     # list them\n  %s --rcb PROFILE HOST # run Claude Code as one\n", u, len(ps), remote.Prog, remote.Prog)
+		return 0
+	case args[0] == "profiles" && len(args) == 1:
+		l, err := rcb.Load()
+		if err != nil {
+			return fail(err)
+		}
+		ps, err := rcb.Profiles(l)
+		if err != nil {
+			return fail(err)
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tNAME\tCLAUDE ACCOUNT\tNODE\tEXIT\tTIME ZONE")
+		for _, p := range ps {
+			node, ip, tz := "-", "-", "-"
+			if p.Node != nil {
+				node = p.Node.Name
+			}
+			if p.Exit != nil {
+				ip, tz = p.Exit.IP, p.Exit.TimeZone
+			}
+			email := p.Email
+			switch {
+			case p.Unavailable:
+				email += " (unavailable)"
+			case email == "":
+				email = "-"
+			}
+			fmt.Fprintln(tw, strings.Join([]string{p.ID, p.Name, email, node, ip, tz}, "\t"))
+		}
+		tw.Flush()
+		return 0
+	case args[0] == "logout" && len(args) == 1:
+		return fail(rcb.Remove())
+	}
+	return usage()
 }
