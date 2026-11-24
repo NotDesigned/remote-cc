@@ -2,8 +2,8 @@
 services:
   gateway:
     image: ${RCC_IMAGE:-ghcr.io/notdesigned/remote-cc-server:latest}
-    container_name: remote-cc-gateway
-    hostname: remote-cc-gateway
+    container_name: ${RCC_GATEWAY:-remote-cc-gateway}
+    hostname: ${RCC_GATEWAY:-remote-cc-gateway}
     restart: unless-stopped
     init: true
     environment:
@@ -18,5 +18,5 @@ services:
       - remote-cc
 networks:
   remote-cc:
-    name: remote-cc
+    name: ${RCC_NETWORK:-remote-cc}
     external: true

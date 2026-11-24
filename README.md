@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/NotDesigned/remote-cc/main/install.
 
 ### 服务端（B）
 
-服务端是一个 Docker 容器，在**本机**上执行一条命令就能部署：
+在**本机**上执行一条命令就能部署：默认部署的是多用户服务器，包括一个网关和每人一个容器，你自己是第一个用户。
 
 ```sh
 remote-cc setup-server root@服务器                    # 或 ubuntu@服务器（有 sudo 即可）
@@ -60,7 +60,13 @@ remote-cc setup-server --install-docker ubuntu@服务器 # 全新的机器，顺
 
 宿主机需要 `/dev/fuse`。Docker 已经装好就直接用；没有的话，加 `--install-docker` 自动安装。
 
-`setup-server` 完成后，会在本机测试容器端口能否连通，并打印要加进 `~/.ssh/config` 的 `Host cc` 配置。如果端口不通，打印的是通过宿主机 ssh 跳转进入的配置。详见 [deploy/README.md](deploy/README.md)。
+`setup-server` 会完成以下几件事：
+- 在服务器上安装网关，并为你创建用户（默认名为 `owner`，可以用 `--user` 指定）。
+- 在本机生成这台服务器专用的密钥，并写好 `~/.ssh/remote-cc/config`（别名是 `<主机名第一段>-cc`），同时固定主机指纹。
+- 测试网关端口能否连通；如果不通，自动改用经宿主机 ssh 跳转的配置。
+- 最后实际连一次，确认配置可用。
+
+想要旧的"单个容器"布局，加 `--single`。详见 [deploy/README.md](deploy/README.md)。
 
 B 端不需要单独安装别的东西：remote-cc 每次连接时都会自动上传匹配架构的 `rcc-shim`。也可以不用 Docker，直接在 B 上安装 `claude` 和 `sshfs`。
 
@@ -75,11 +81,10 @@ remote-cc join <邀请码>                  # 用户：一条命令完成密钥�
 ## 快速上手
 
 ```sh
-remote-cc setup-server root@服务器   # 1. 部署服务端（一次）
-# 2. 把它打印的 Host cc 配置加进 ~/.ssh/config
-ssh cc hostname                      # 3. 检查：应该输出 remote-cc
-remote-cc login cc                   # 4. 在容器里登录 Claude（每台本机一次）
-cd 你的项目 && remote-cc cc          # 5. 开始使用
+remote-cc setup-server root@服务器.example.com   # 1. 部署服务端，并配置好本机（别名：服务器-cc）
+remote-cc login 服务器-cc                        # 2. 在容器里登录 Claude（一次）
+cd 你的项目 && remote-cc 服务器-cc               # 3. 开始使用
+remote-cc user add root@服务器.example.com alice # 加人：输出一条一次性邀请码，对方执行 remote-cc join <邀请码>
 ```
 
 ## 用法

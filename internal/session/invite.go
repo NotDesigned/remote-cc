@@ -72,9 +72,7 @@ const userInviteScript = multiEnv + `
 [ -f "$DIR/users/$NAME/.env" ] || { echo "rcc: no user $NAME (create it with 'user add')" >&2; exit 3; }
 k="$DATA/keys/$NAME/authorized_keys"; inv="$DATA/keys/$NAME.invites"
 touch "$inv"; chmod 644 "$inv"
-# Containers made by older rcc mounted the key file read-only: refresh them.
-printf '%s' "$COMPOSE_B64" | base64 -d > "$DIR/users/$NAME/compose.yml"
-(cd "$DIR/users/$NAME" && docker compose up -d --quiet-pull >&2)
+# Never touches the container: an invite must not interrupt sessions.
 exp=$(date -d "+$TTL hours" +%Y%m%d%H%M)
 # Drop expired invite lines while we are here.
 now=$(date +%Y%m%d%H%M)
@@ -250,12 +248,56 @@ Host target
 	}
 
 	// 4. ssh config: our own file, included from ~/.ssh/config.
+	if err := writeClientConfig(alias, iv.Host, iv.Port, iv.User, iv.GwKey, iv.UserKey, ""); err != nil {
+		return err
+	}
+
+	// 5. Check.
+	if err := verifyAlias(alias, iv.User); err != nil {
+		return fmt.Errorf("enrolled, but %w", err)
+	}
+	fmt.Printf("\nDone: this machine can now reach %s as \"%s\".\n  %s login %s     # sign in to Claude (once)\n  %s %s           # in a project directory\n",
+		iv.Host, alias, Prog, alias, Prog, alias)
+	return nil
+}
+
+// writeClientConfig writes the "<alias>" (container) and "<alias>-gw"
+// (gateway) entries into ~/.ssh/remote-cc/config, includes that file from
+// ~/.ssh/config, and pins both host keys. With jump set, the gateway is
+// reached through that ssh destination (for servers whose port is closed).
+func writeClientConfig(alias, host string, port int, user, gwKey, ukKey, jump string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	sshDir := filepath.Join(home, ".ssh")
+	dir := filepath.Join(sshDir, "remote-cc")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	gwName := host
+	if port != 22 {
+		gwName = fmt.Sprintf("[%s]:%d", host, port)
+	}
+	ukAlias := fmt.Sprintf("rcc-%s@%s", user, host)
+	for _, l := range []string{gwName + " " + gwKey, ukAlias + " " + ukKey} {
+		if strings.Count(l, " ") < 2 {
+			return errors.New("missing host keys")
+		}
+		if err := appendLine(filepath.Join(sshDir, "known_hosts"), l); err != nil {
+			return err
+		}
+	}
+	gwHost, gwJump := host, ""
+	if jump != "" {
+		gwHost, gwJump = "127.0.0.1", "    ProxyJump "+jump+"\n"
+	}
 	block := fmt.Sprintf(`# remote-cc:%[1]s begin
 Host %[1]s-gw
     HostName %[2]s
     Port %[3]d
     User %[4]s
-    IdentityFile ~/.ssh/remote-cc/%[1]s_ed25519
+%[7]s    IdentityFile ~/.ssh/remote-cc/%[1]s_ed25519
     IdentitiesOnly yes
     HostKeyAlias %[5]s
 Host %[1]s
@@ -268,21 +310,19 @@ Host %[1]s
     IdentitiesOnly yes
     ServerAliveInterval 15
 # remote-cc:%[1]s end
-`, alias, iv.Host, iv.Port, iv.User, gwName, ukAlias)
+`, alias, gwHost, port, user, gwName, ukAlias, gwJump)
 	if err := upsertBlock(filepath.Join(dir, "config"), alias, block); err != nil {
 		return err
 	}
-	if err := ensureInclude(filepath.Join(sshDir, "config")); err != nil {
-		return err
-	}
+	return ensureInclude(filepath.Join(sshDir, "config"))
+}
 
-	// 5. Check.
-	chk, err := exec.Command("ssh", "-o", "BatchMode=yes", alias, "hostname").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(chk)) != "rcc-"+iv.User {
-		return fmt.Errorf("enrolled, but `ssh %s hostname` did not answer rcc-%s:\n%s", alias, iv.User, strings.TrimSpace(string(chk)))
+// verifyAlias checks that `ssh <alias> hostname` reaches rcc-<user>.
+func verifyAlias(alias, user string) error {
+	out, err := exec.Command("ssh", "-o", "BatchMode=yes", alias, "hostname").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "rcc-"+user {
+		return fmt.Errorf("`ssh %s hostname` did not answer rcc-%s:\n%s", alias, user, strings.TrimSpace(string(out)))
 	}
-	fmt.Printf("\nDone: this machine can now reach %s as \"%s\".\n  %s login %s     # sign in to Claude (once)\n  %s %s           # in a project directory\n",
-		iv.Host, alias, Prog, alias, Prog, alias)
 	return nil
 }
 

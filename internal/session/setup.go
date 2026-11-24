@@ -27,8 +27,12 @@ type SetupConfig struct {
 	KeyFiles      []string // public keys (on A) to authorize; default: agent / ~/.ssh/id_*.pub
 	KeysFromHost  bool     // also authorize the host user's own authorized_keys
 	MigrateHistory bool    // copy rcc history profiles from a previous non-docker install
-	Name           string  // container name
+	Name           string  // container name (single) / instance name (multi)
 	InstallDocker  bool    // install Docker with get.docker.com if missing
+	Single         bool    // old single-user layout instead of gateway + per-user containers
+	User           string  // multi: your user name on the server (default owner)
+	Alias          string  // multi: ssh alias for your container (default <host>-cc)
+	PublicHost     string  // multi: address clients use, if not the ssh destination's
 }
 
 // setupScript runs on the host. As a non-root user it re-runs itself as root
@@ -89,6 +93,7 @@ done
 case "$BIND" in ""|0.0.0.0|"*") BIND=""; publish="$PORT:22" ;; *) publish="$BIND:$PORT:22" ;; esac
 cat > "$DIR/.env" <<ENV
 RCC_NAME=$NAME
+COMPOSE_PROJECT_NAME=$NAME
 RCC_PORT=$PORT
 RCC_BIND=$BIND
 RCC_PUBLISH=$publish
@@ -118,10 +123,15 @@ echo "fingerprint=$(docker exec "$NAME" ssh-keygen -lf /etc/ssh/keys/ssh_host_ed
 echo "claude=$(docker exec "$NAME" claude --version 2>/dev/null | head -1)"
 `
 
-// Setup installs or updates the server container on a host.
+// Setup installs or updates a server. By default it is a multi-user server
+// (gateway + one container per user) with the caller as its first user;
+// with Single, the original single-container layout.
 func Setup(sc SetupConfig) error {
 	if sc.SSH == "" {
 		sc.SSH = "ssh"
+	}
+	if !sc.Single {
+		return setupMulti(sc)
 	}
 	keys, err := collectKeys(sc.KeyFiles)
 	if err != nil && !sc.KeysFromHost {
@@ -198,10 +208,11 @@ const removeScript = sudoPrelude + `
 cd "$DIR"
 if [ -f multi-user ]; then
   data=$(sed -n 's/^RCC_DATA=//p' .env); port=$(sed -n 's/^RCC_PORT=//p' .env)
+  net=$(sed -n 's/^RCC_NETWORK=//p' .env); net=${net:-remote-cc}
   echo "port=${port:-2222}"
-  for d in users/*/; do [ -d "$d" ] && (cd "$d" && docker compose down --remove-orphans >&2); done
-  docker compose down --rmi all --remove-orphans >&2 || docker compose down --remove-orphans >&2
-  docker network rm remote-cc >/dev/null 2>&1 || true
+  for d in users/*/; do [ -d "$d" ] && (cd "$d" && docker compose down >&2); done
+  docker compose down --rmi all >&2 || docker compose down >&2
+  docker network rm "$net" >/dev/null 2>&1 || true
   cd / && rm -rf "$DIR"
   echo "rcc: removed the gateway, all user containers and $DIR" >&2
   if [ "$PURGE" = 1 ] && [ -n "$data" ] && [ "$data" != / ]; then rm -rf "$data"; echo "rcc: deleted $data (all users' logins and history)" >&2
@@ -210,7 +221,7 @@ if [ -f multi-user ]; then
 fi
 data=$(sed -n 's/^RCC_DATA=//p' .env 2>/dev/null); port=$(sed -n 's/^RCC_PORT=//p' .env 2>/dev/null)
 echo "port=${port:-2222}"
-docker compose down --rmi all --remove-orphans >&2 || docker compose down --remove-orphans >&2
+docker compose down --rmi all >&2 || docker compose down >&2
 cd / && rm -rf "$DIR"
 echo "rcc: removed the container and $DIR (the image too, unless another container still uses it)" >&2
 if [ "$PURGE" = 1 ] && [ -n "$data" ] && [ "$data" != / ]; then
@@ -229,6 +240,7 @@ if [ -f multi-user ]; then
   # Multi-user server: gateway + one container per user, all on one image.
   if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
   image=$(sed -n 's/^RCC_IMAGE=//p' .env); data=$(sed -n 's/^RCC_DATA=//p' .env)
+  gw=$(sed -n 's/^RCC_GATEWAY=//p' .env); gw=${gw:-remote-cc-gateway}
   users=$(grep -v '^$' "$data/gateway/etc/users" 2>/dev/null || true)
   first=$(printf '%s\n' "$users" | head -1)
   echo "before=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
@@ -236,9 +248,10 @@ if [ -f multi-user ]; then
   latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
   gw_new=$(printf '%s' "$COMPOSE_GW_B64" | base64 -d); user_new=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
   changed=""
-  [ "$(docker inspect -f '{{.Image}}' remote-cc-gateway 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ] || changed="gateway"
+  [ "$(docker inspect -f '{{.Image}}' "$gw" 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ] || changed="gateway"
   for n in $users; do
-    [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] && [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] || changed="$changed $n"
+    [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] && [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] &&
+      [ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "rcc-$n" 2>/dev/null)" = "rcc-$n" ] || changed="$changed $n"
   done
   [ -n "$changed" ] || { echo "uptodate=1"; exit 0; }
   busy=""
@@ -249,10 +262,17 @@ if [ -f multi-user ]; then
   if [ -n "$busy" ] && [ "$FORCE" != 1 ]; then
     echo "rcc: active sessions would be disconnected:$busy; retry when they end, or pass --force" >&2; exit 5
   fi
-  ids() { for c in remote-cc-gateway $(for n in $users; do echo "rcc-$n"; done); do docker inspect -f '{{.Id}}' "$c" 2>/dev/null; done; }
+  ids() { for c in "$gw" $(for n in $users; do echo "rcc-$n"; done); do docker inspect -f '{{.Id}}' "$c" 2>/dev/null; done; }
   ids0=$(ids)
   printf '%s\n' "$gw_new" > compose.yml && docker compose up -d >&2
-  for n in $users; do printf '%s\n' "$user_new" > "users/$n/compose.yml"; (cd "users/$n" && docker compose up -d >&2); done
+  for n in $users; do
+    printf '%s\n' "$user_new" > "users/$n/compose.yml"
+    grep -q '^COMPOSE_PROJECT_NAME=' "users/$n/.env" || echo "COMPOSE_PROJECT_NAME=rcc-$n" >> "users/$n/.env"
+    grep -q '^RCC_NETWORK=' "users/$n/.env" || echo "RCC_NETWORK=$(sed -n 's/^RCC_NETWORK=//p' .env | grep . || echo remote-cc)" >> "users/$n/.env"
+    proj=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "rcc-$n" 2>/dev/null || true)
+    [ -n "$proj" ] && [ "$proj" != "rcc-$n" ] && docker rm -f "rcc-$n" >/dev/null   # rcc <= 0.4.0 project name
+    (cd "users/$n" && docker compose up -d >&2)
+  done
   docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/NotDesigned/remote-cc" >/dev/null 2>&1 || true
   echo "after=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
   [ "$ids0" != "$(ids)" ] && echo "recreated=1"

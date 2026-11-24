@@ -129,12 +129,14 @@ options:
                    skills, agents, commands and plugins stay shared via symlinks.
 
 server (Docker):
-  rcc setup-server [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc]
+  rcc setup-server [--user owner] [--alias NAME] [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc]
                    [--image IMG] [--key FILE.pub]... [--keys-from-host]
                    [--migrate-history] [--name remote-cc] [--install-docker]
                    [ssh options] user@host
-                   install/update the server container on a host with Docker;
-                   authorizes your public key and pins the container's host key.
+                   install/update a multi-user server (gateway + one container per
+                   user) with you as its first user: creates a key for it on this
+                   machine, writes ~/.ssh/remote-cc/config (alias <host>-cc) and
+                   pins the host keys. --single: the old one-container layout.
                    user is root or any account with sudo (asks for the sudo
                    password if needed); --install-docker uses get.docker.com
 
@@ -283,7 +285,7 @@ func runAccountCommand(action string, args []string) int {
 
 // runSetupServer: rcc setup-server [setup flags] [ssh options] [user@]host
 func runSetupServer(args []string) int {
-	sc := session.SetupConfig{Port: 2222, Bind: "", DataDir: "/var/lib/remote-cc",
+	sc := session.SetupConfig{Port: 2222, Bind: "", DataDir: "/var/lib/remote-cc", Name: "remote-cc",
 		InstallDir: "/opt/remote-cc", Image: "ghcr.io/notdesigned/remote-cc-server:latest"}
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -322,6 +324,14 @@ func runSetupServer(args []string) int {
 			sc.Name = val()
 		case "--install-docker":
 			sc.InstallDocker = true
+		case "--single":
+			sc.Single = true
+		case "--user":
+			sc.User = val()
+		case "--alias":
+			sc.Alias = val()
+		case "--public-host":
+			sc.PublicHost = val()
 		default:
 			rest = append(rest, a)
 		}
