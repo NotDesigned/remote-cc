@@ -6,12 +6,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"remote-cc/internal/netexec"
 	"remote-cc/internal/shim"
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == "git" {
+		os.Exit(shim.Git(os.Args[1:]))
+	}
 	if netexec.Is(os.Args[1:]) {
 		os.Exit(netexec.Main(os.Args[1:]))
 	}

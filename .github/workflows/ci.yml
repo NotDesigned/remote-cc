@@ -24,6 +24,21 @@ jobs:
         run: for os in linux darwin windows; do GOOS=$os go vet ./...; done
       - run: go test ./...
 
+  # The local side on real Windows (Git Bash, job objects) and macOS: the
+  # agent runs Claude-style commands and forwarded git calls.
+  local-side:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -v ./internal/agent ./internal/procjob ./internal/pathmap ./internal/shim ./internal/cli
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
@@ -63,3 +78,7 @@ jobs:
           sudo docker ps -a
           for c in $(sudo docker ps -aq); do echo "--- $c"; sudo docker logs --tail 50 "$c"; done
           cat ~/.ssh/remote-cc/config 2>/dev/null || true
+          echo "--- last.log"; tail -60 ~/.cache/rcc/last.log 2>/dev/null || true
+          echo "--- repo"; git -C ~/repo worktree list 2>&1 || true; ls -la ~/repo ~/repo/.claude ~/repo/.claude/worktrees 2>&1 || true
+          echo "--- mock"; cat /tmp/mock-results /tmp/mockapi.log 2>/dev/null | tail -30 || true
+          sudo docker exec rcc-owner sh -c 'ls -la /root/.cache/rcc/shims/*/ /root/.cache/rcc/shims/*/bin/; which -a git' 2>&1 || true

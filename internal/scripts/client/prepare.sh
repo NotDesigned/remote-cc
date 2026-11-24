@@ -30,5 +30,9 @@ if [ "$NEED_SHIM" = 1 ]; then
   chmod 755 "$tmp"
   mv -f "$tmp" "$CACHE/shims/$SHIM_SHA/rcc-shim"
 fi
+# bin/git: Claude Code's own git calls on the project run on the local
+# machine (see shim.Git); everything else falls through to B's git.
+mkdir -p "$CACHE/shims/$SHIM_SHA/bin"
+ln -sf ../rcc-shim "$CACHE/shims/$SHIM_SHA/bin/git"
 touch "$CACHE/shims/$SHIM_SHA"
 find "$CACHE/shims" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true

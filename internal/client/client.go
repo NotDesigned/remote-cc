@@ -54,6 +54,7 @@ type Config struct {
 	// = the container's regular ~/.claude, else a named account.
 	Account     string
 	NoIsSandbox bool // do not set IS_SANDBOX=1 for claude as root
+	RemoteGit   bool // Claude Code's own git calls run on the server, not here
 	NoPrompt    bool // do not append remote-cc's system prompt
 	// RCB runs claude as this remote-claude-browser profile: its account
 	// (rcb-<id>) and, inside the egress host's namespace, its proxy node.
@@ -245,9 +246,16 @@ func (s *session) start() (int, error) {
 	// Command agent.
 	logFile := s.openLog()
 	defer logFile.Close()
-	ag, err := agent.New(agent.Options{Token: token, Logger: log.New(logFile, "", log.LstdFlags), TempDir: s.conn.Tmp()})
+	logger := log.New(logFile, "", log.LstdFlags)
+	ag, err := agent.New(agent.Options{Token: token, Logger: logger, TempDir: s.conn.Tmp()})
 	if err != nil {
 		return 1, err
+	}
+	logger.Printf("shell: %s", ag.Shell())
+	s.conn.Logf("local shell: %s", ag.Shell())
+	if err := ag.Check(s.local); err != nil {
+		logger.Printf("shell check failed: %v", err)
+		return 1, fmt.Errorf("Claude's commands could not run on this machine:\n     %v\n     Set RCC_SHELL to a working bash (on Windows: Git for Windows' bash.exe, e.g. C:\\Program Files\\Git\\bin\\bash.exe)", err)
 	}
 	claudeArgs := s.cfg.ClaudeArgs
 	if !s.cfg.NoPrompt {
@@ -296,7 +304,7 @@ func (s *session) start() (int, error) {
 
 	// Claude Code, interactive.
 	sandbox := s.facts["uid"] == "0" && !s.cfg.NoIsSandbox
-	run := s.conn.Script(true, nil, common+remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox))+
+	run := s.conn.Script(true, nil, common+remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox), "LOCAL_GIT", remote.Bool(!s.cfg.RemoteGit))+
 		rcbVars(s.cfg.RCB, true)+remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
 	run.Stdin, run.Stdout, run.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The tty is in raw mode while ssh runs; keep stray signals from killing
@@ -342,7 +350,11 @@ func (s *session) openLog() *os.File {
 	if dir, err := os.UserCacheDir(); err == nil {
 		dir = filepath.Join(dir, "rcc")
 		if os.MkdirAll(dir, 0o700) == nil {
-			if f, err := os.Create(filepath.Join(dir, "last.log")); err == nil {
+			// Keep the previous session's log too: problems are often
+			// reported after another session has started.
+			last := filepath.Join(dir, "last.log")
+			os.Rename(last, filepath.Join(dir, "prev.log"))
+			if f, err := os.Create(last); err == nil {
 				s.conn.Logf("log file: %s", f.Name())
 				return f
 			}

@@ -1,6 +1,7 @@
 # shellcheck shell=sh
-# Pulls the image and recreates the gateway / user containers only when the
-# image or compose files changed; refuses while sessions run (unless FORCE).
+# Starts stopped containers, pulls the image and recreates the gateway / user
+# containers only when the image or compose files changed; refuses while
+# sessions run (unless FORCE).
 : "${DIR:?}" "${IMAGE?}" "${FORCE:?}" "${COMPOSE_GW_B64:?}" "${COMPOSE_USER_B64:?}"
 load_server
 cd "$DIR" || exit 3
@@ -9,6 +10,18 @@ image=$(sed -n 's/^RCC_IMAGE=//p' .env)
 grep -q '^COMPOSE_PROJECT_NAME=' .env || echo "COMPOSE_PROJECT_NAME=$NET" >> .env
 users=$(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true)
 first=$(printf '%s\n' "$users" | head -1)
+# Containers that exist but were stopped (docker stop, or they crashed past
+# their restart policy) are started first: that needs no recreate.
+started=""
+for c in "$GW" $(for n in $users; do echo "rcc-$n"; done); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = false ] || continue
+  docker start "$c" >/dev/null && started="$started $c"
+done
+if [ -n "$started" ]; then
+  # shellcheck disable=SC2086 # one name per word
+  wait_up $started || exit 4
+  echo "started=${started# }"
+fi
 echo "before=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
 docker pull -q "$image" >/dev/null 2>&1 || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
 latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)

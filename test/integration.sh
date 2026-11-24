@@ -9,6 +9,7 @@
 # alice and alice2).
 set -eu
 RCC=$(readlink -f "${RCC:?}")
+TESTDIR=$(cd "$(dirname "$0")" && pwd)
 IMAGE=${IMAGE:?}
 ME=$(id -un)
 ADMIN="$ME@localhost"
@@ -67,6 +68,31 @@ set -e
 [ "$rc" = 7 ] || fail "exit code $rc, want 7"
 remote-cc accounts "$alias"
 
+step "real Claude Code (mock API): Bash tool, cwd, --worktree through local git"
+gwip=$(sudo docker network inspect remote-cc -f '{{(index .IPAM.Config 0).Gateway}}')
+rm -f /tmp/mock-results
+python3 "$TESTDIR/mockapi.py" --listen "$gwip:8765" --log /tmp/mock-results \
+  --command 'uname -n; pwd' --command 'mkdir -p sub && cd sub && git rev-parse --abbrev-ref HEAD' --command pwd \
+  > /tmp/mockapi.log 2>&1 &
+mock=$!
+printf '#!/bin/sh\nexport ANTHROPIC_BASE_URL=http://%s:8765 ANTHROPIC_API_KEY=sk-ant-test CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\nexec claude "$@"\n' "$gwip" > /tmp/claude-mock
+chmod 755 /tmp/claude-mock
+sudo docker cp /tmp/claude-mock rcc-owner:/usr/local/bin/claude-mock
+repo=$HOME/repo
+mkdir -p "$repo" && git -C "$repo" init -q && git -C "$repo" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+tty_run "cd '$repo' && remote-cc --claude /usr/local/bin/claude-mock $alias -- -w wt1 -p go --dangerously-skip-permissions"
+kill "$mock" 2>/dev/null || true
+cat /tmp/mock-results
+wt="$repo/.claude/worktrees/wt1"
+r1=$(sed -n 1p /tmp/mock-results)
+r2=$(sed -n 2p /tmp/mock-results)
+r3=$(sed -n 3p /tmp/mock-results)
+case "$r1" in *"$(uname -n)"*"$wt"*) ;; *) fail "Bash tool did not run here, in the worktree: $r1" ;; esac
+case "$r2" in *worktree-wt1*) ;; *) fail "git in the worktree: $r2" ;; esac
+case "$r3" in *"$wt/sub"*) ;; *) fail "cwd not kept between commands: $r3" ;; esac
+git -C "$repo" worktree list | grep -q "$wt" || fail "worktree not created on this machine"
+grep -q "cmd=git " ~/.cache/rcc/last.log || fail "Claude Code's git calls did not run here"
+
 step "user add: invite, join on another machine"
 inv=$(remote-cc user add "$ADMIN" alice | grep '^rcc1\.')
 as alice remote-cc join "$inv"
@@ -102,6 +128,14 @@ remote-cc user remove --purge "$ADMIN" alice
 expect_fail as alice ssh -o BatchMode=yes "$alias" true
 expect_fail sudo docker inspect rcc-alice >/dev/null 2>&1
 
+step "a stopped container: clear error, update-server starts it"
+sudo docker stop rcc-owner >/dev/null
+if out=$(cd "$proj" && remote-cc --claude /usr/local/bin/fake-claude "$alias" 2>&1); then fail "connected to a stopped container"; fi
+case "$out" in *"could not reach your container"*) ;; *) fail "no hint for a stopped container: $out" ;; esac
+remote-cc update-server --image "$IMAGE" "$ADMIN" | tee /tmp/upd
+grep -q "started stopped container(s): rcc-owner" /tmp/upd || fail "update-server did not start rcc-owner"
+[ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after start"
+
 step "update-server"
 remote-cc update-server --image "$IMAGE" "$ADMIN"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update"
@@ -110,7 +144,7 @@ step "server migrate: a 0.4 single-container deployment"
 ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/single_ed25519
 sdir=/opt/rcc-single sdata=/var/lib/rcc-single
 sudo mkdir -p "$sdir"
-sudo cp "$(dirname "$0")/testdata/compose.single.yml" "$sdir/compose.yml"
+sudo cp "$TESTDIR/testdata/compose.single.yml" "$sdir/compose.yml"
 printf 'RCC_IMAGE=%s\nRCC_NAME=rccsingle\nRCC_DATA=%s\nRCC_PORT=2223\nRCC_PUBLISH=2223:22\nAUTHORIZED_KEYS=%s\n' \
   "$IMAGE" "$sdata" "$(cat ~/.ssh/single_ed25519.pub)" | sudo tee "$sdir/.env" >/dev/null
 (cd "$sdir" && sudo docker compose up -d)
@@ -142,11 +176,19 @@ expect_fail remote-cc server init --install-dir "$sdir" "$ADMIN"
 remote-cc server migrate --install-dir "$sdir" --name rccs --user bob --image "$IMAGE" "$ADMIN"
 # Same host key (StrictHostKeyChecking would refuse a changed one), same data.
 [ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated data"
+
+step "update-server --all (the main and the migrated server)"
+remote-cc servers | tee /tmp/servers
+[ "$(grep -c "$ADMIN" /tmp/servers)" = 2 ] || fail "servers should list both installs"
+remote-cc update-server --all --image "$IMAGE"
+[ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update --all"
+[ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated server after update --all"
 remote-cc remove-server --purge --install-dir "$sdir" "$ADMIN"
 
 step "remove-server (it removes the image too, so it comes last)"
 remote-cc remove-server --purge "$ADMIN"
 expect_fail sudo docker inspect remote-cc-gateway >/dev/null 2>&1
 expect_fail sudo docker inspect rcc-owner >/dev/null 2>&1
+remote-cc servers | grep -q "no servers" || fail "remove-server should forget the server"
 
 step "all passed"

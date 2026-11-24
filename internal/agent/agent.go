@@ -52,6 +52,34 @@ func New(opt Options) (*Agent, error) {
 
 func (a *Agent) Shell() string { return a.shell }
 
+// Check runs a trivial command the way Claude's commands will run, so that a
+// broken shell is reported before Claude starts instead of as silent failures.
+func (a *Agent) Check(dir string) error {
+	cmd := exec.Command(a.shell, "-c", wrapScript("echo rcc-shell-ok"))
+	cmd.Dir = dir
+	setProcessGroup(cmd)
+	done := make(chan struct{})
+	var out []byte
+	var err error
+	go func() { out, err = cmd.CombinedOutput(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		return fmt.Errorf("%s did not answer within 20s", a.shell)
+	}
+	if strings.Contains(string(out), "rcc-shell-ok") {
+		return nil
+	}
+	msg := strings.TrimSpace(strings.ReplaceAll(string(out), "\x00", "")) // UTF-16 noise
+	if msg == "" {
+		msg = "(no output)"
+	}
+	return fmt.Errorf("%s -c 'echo rcc-shell-ok' failed (%v): %s", a.shell, err, msg)
+}
+
 // Serve accepts connections until l is closed.
 func (a *Agent) Serve(l net.Listener) error {
 	for {
@@ -112,10 +140,30 @@ func (a *Agent) handle(nc net.Conn) {
 }
 
 func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, error) {
-	cmd := exec.Command(a.shell, "-c", wrapScript(st.Cmd))
+	var cmd *exec.Cmd
+	var flush func() error
+	stdout := io.Writer(proto.ChunkWriter{C: c, T: proto.TStdout})
+	if len(st.Argv) > 0 {
+		if st.Argv[0] != "git" {
+			return nil, fmt.Errorf("cannot run %q directly", st.Argv[0])
+		}
+		g, err := gitCommand(st.Argv[1:])
+		if err != nil {
+			c.Write(proto.TStderr, []byte("git: not installed on the local machine (rcc runs Claude Code's git commands there)\n"))
+			return &proto.Exit{Code: 127}, nil
+		}
+		cmd = g
+		if runtime.GOOS == "windows" {
+			dw := &driveWriter{w: stdout}
+			stdout, flush = dw, dw.Flush
+		}
+		st.Cmd = strings.Join(st.Argv, " ") // for the log
+	} else {
+		cmd = exec.Command(a.shell, "-c", wrapScript(st.Cmd))
+	}
 	cmd.Dir = dir
 	cmd.Env = mergeEnv(os.Environ(), st.Env)
-	cmd.Stdout = proto.ChunkWriter{C: c, T: proto.TStdout}
+	cmd.Stdout = stdout
 	cmd.Stderr = proto.ChunkWriter{C: c, T: proto.TStderr}
 	// Background jobs may keep stdout open forever; stop waiting for them
 	// shortly after the shell itself exits.
@@ -172,6 +220,9 @@ func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, er
 	}()
 
 	werr := cmd.Wait()
+	if flush != nil {
+		flush()
+	}
 	ex := exitInfo(cmd.ProcessState)
 	if werr != nil && cmd.ProcessState == nil {
 		return nil, werr
@@ -234,19 +285,23 @@ func FindShell() (string, error) {
 // findGitBash avoids C:\Windows\System32\bash.exe, which is the WSL launcher
 // and would run commands inside a different filesystem.
 func findGitBash() (string, error) {
+	// Standard installs first: the git found in PATH may belong to Anaconda,
+	// MSYS2 or Cygwin, whose bash behaves differently or not at all here.
 	var cands []string
-	if g, err := exec.LookPath("git"); err == nil {
-		// ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
-		root := filepath.Dir(filepath.Dir(g))
-		cands = append(cands, filepath.Join(root, "bin", "bash.exe"))
-	}
-	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"} {
+	for _, env := range []string{"ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"} {
 		if v := os.Getenv(env); v != "" {
 			cands = append(cands, filepath.Join(v, "Git", "bin", "bash.exe"))
 		}
 	}
 	if v := os.Getenv("LOCALAPPDATA"); v != "" {
 		cands = append(cands, filepath.Join(v, "Programs", "Git", "bin", "bash.exe"))
+	}
+	if g, err := exec.LookPath("git"); err == nil {
+		// ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe (a portable Git for Windows)
+		root := filepath.Dir(filepath.Dir(g))
+		if _, err := os.Stat(filepath.Join(root, "cmd", "git.exe")); err == nil {
+			cands = append(cands, filepath.Join(root, "bin", "bash.exe"))
+		}
 	}
 	for _, c := range cands {
 		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {

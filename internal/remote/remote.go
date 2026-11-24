@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,12 +106,28 @@ func (c *Conn) Raw(command string) *exec.Cmd {
 // Facts runs a script and parses its key=value output.
 func (c *Conn) Facts(script string) (map[string]string, error) {
 	cmd := c.Script(false, nil, script)
-	cmd.Stderr = os.Stderr // auth prompts and host key questions reach the user
+	var errBuf bytes.Buffer
+	// Auth prompts and host key questions reach the user; a copy is kept to
+	// explain known failures.
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("ssh %s failed: %w", c.T.Dest, err)
+		return nil, fmt.Errorf("ssh %s failed: %w%s", c.T.Dest, err, Hint(errBuf.String()))
 	}
 	return ParseFacts(out), nil
+}
+
+// Hint explains ssh errors that have a known remote-cc cause.
+func Hint(sshErr string) string {
+	// Through the gateway (ProxyJump), a container that is down shows as the
+	// forwarded connection closing before any ssh banner ("UNKNOWN port 65535").
+	if strings.Contains(sshErr, "stdio forwarding failed") || strings.Contains(sshErr, "open failed: connect failed") ||
+		strings.Contains(sshErr, "Connection closed by UNKNOWN port 65535") {
+		return "\n     The server's gateway could not reach your container: it is probably stopped or missing." +
+			"\n     The server's admin can start it: " + Prog + " update-server <docker host>" +
+			"\n     (or on that host: docker start rcc-<user>)"
+	}
+	return ""
 }
 
 // Elevated runs params+body (a scripts.Host script) as root: as is when the

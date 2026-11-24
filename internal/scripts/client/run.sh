@@ -17,6 +17,10 @@ while :; do
 done
 RCC_TOKEN=$(cat "$RUN/token")
 export RCC_SOCK="unix:$SOCK" RCC_TOKEN CLAUDE_CODE_SHELL_PREFIX="$CACHE/shims/$SHIM_SHA/rcc-shim"
+if [ "${LOCAL_GIT:-1}" = 1 ]; then
+  RCC_REAL_GIT=$(command -v git || true)
+  export RCC_ROOT="$R" RCC_REAL_GIT PATH="$CACHE/shims/$SHIM_SHA/bin:$PATH"
+fi
 rcb_guard
 account_env
 # As root, Claude Code refuses --dangerously-skip-permissions unless IS_SANDBOX=1.

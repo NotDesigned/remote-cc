@@ -254,6 +254,21 @@ B 上直接运行的 claude 看到的还是原来的目录。`--profile none` �
   - `internal/remote`（ssh 连接、ControlMaster、提权、facts 解析）、`internal/sshconf`（本机 ssh 配置、密钥、邀请码、join）、`internal/server`（管理命令）、`internal/client`（会话、账号、设备）、`internal/cli`（统一的参数解析器，每个命令只声明自己的参数；`main.go` 只剩一行）。
 - **测试改到 CI**：以前的端到端测试都在开发用的那台服务器上跑，它同时在为用户提供服务（v0.4.1 的事故就是这样发生的），而且磁盘紧张。现在 `test/integration.sh` 在 GitHub 的 runner 上运行：本地构建镜像，runner 自己既是 Docker 宿主机（通过 sudo 账号 ssh 到 localhost），也是几台"用户的电脑"（几个 Linux 用户），覆盖部署、邀请、隔离、自助设备、真实会话（假 claude）、迁移、更新、移除。
 
+## v0.5.1：git 在本机执行，支持 `--worktree`；启动前检查 shell
+
+- **问题**：服务端镜像里原来没有 git。Claude Code 自己调用 git（不经过 Bash 工具，所以不走 `CLAUDE_CODE_SHELL_PREFIX`），用于判断仓库、读取分支和状态、`-w/--worktree` 时执行 `git worktree add` 等，在 B 上全部失败。
+  `--worktree` 因此不可用，Claude 也看不到启动时的 git 状态。
+- **做法**：会话的 PATH 最前面放一个 `git`，它是 rcc-shim 的软链接，shim 看到自己叫 `git` 时进入 git 模式：
+  - 判断这次调用作用在哪个目录（当前目录，加上开头的 `-C`；`--git-dir`/`--work-tree` 也要在项目内）。在项目挂载目录里，就通过命令通道转到 A 执行；不在，就 exec B 自己的 git（镜像里也装了 git，给插件市场等用）。
+  - 转发时直接传参数数组（协议里新增 `Argv`），A 上直接执行 git，不经过 shell：没有引号问题，也不用每次启动登录 shell。只转发 `GIT_*`、`LC_ALL` 等 Claude 为 git 设置的变量。
+  - Windows 上把参数里 B 形式的路径（`/c/x`、`--opt=/c/x`）换成 `C:/x`，git 输出里的 `C:/x` 换回 `/c/x`（按行处理，`-z` 的 NUL 也算行尾）。不用 Git Bash 的自动参数转换，因为 Claude 会传 `core.hooksPath=/dev/null` 这类值，自动转换的结果不可预测。
+  - 本地实测（真实 Claude Code 2.1.325 加一个假的 Messages API）：`-w wt1` 时 Claude 发出约 20 次 git 调用，全部到了 A；worktree 建在 A 的 `<项目>/.claude/worktrees/wt1`，分支 `worktree-wt1`，Bash 命令在 worktree 里执行。
+- **CI 里跑真实的 Claude Code**：`test/mockapi.py` 是一个假的 Anthropic Messages API（支持流式），让 Claude 依次调用几次 Bash 工具，并记录结果。集成测试在用户容器里用它跑真实的 claude：检查命令在 runner 上执行、cwd 在调用之间保持、`--worktree` 建在 runner 上、Claude 的 git 调用走了本机。这样不需要 Claude 账号就能覆盖真实的命令格式。
+- **sshfs 缓存**：CI 里发现，git 在 A 上建好 worktree 后，Claude 在 B 上立刻 `realpath` 却得到 ENOENT：挂载参数里的 `negative_timeout=1` 让内核把"不存在"缓存了 1 秒。现在是 `negative_timeout=0`。
+  v0.5.1 曾经把 sshfs 自己的目录缓存也一起关掉（`dir_cache=no`），结果明显变慢：有目录缓存时，一次 READDIR 就带回所有条目的属性；关掉后每个文件都要单独 LSTAT 一次，一个上千文件的目录就是上千次往返，往返延迟高时 Glob/Grep/Read 和 Claude 的后台扫描都很慢。
+  v0.5.3 恢复目录缓存，但时间从默认的 20 秒缩短为 5 秒（`dcache_timeout=5`），缩短 A 上改动的文件在 B 上看起来是旧状态的时间。
+- **启动前检查 shell**：有用户报告 Windows 上每条命令都是 exit code 1 且没有输出。现在 rcc 启动 Claude 前先在本机 shell 里执行一次 `echo`，失败就停止并显示 shell 路径和输出；`last.log` 记录使用的 shell。Windows 上优先使用 Git for Windows 的标准安装位置，PATH 里的 git 只有旁边有 `cmd\git.exe`（确认是 Git for Windows）时才采用。
+
 ## 实现选型
 
 - **语言**：Go。`scripts/build.sh` 先编译 linux/amd64 和 linux/arm64 的 `rcc-shim`（约 2.8MB），用 `go:embed` 嵌进各平台的 rcc 里，所以 rcc 不管跑在什么平台都能给 B 装上 shim。

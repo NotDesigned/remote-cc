@@ -97,15 +97,20 @@ remote-cc cc                         # 在当前目录启动 Claude Code
 remote-cc cc ~/proj                  # 指定项目目录
 remote-cc cc -- --continue           # 继续这个目录上次的对话（--resume 选择历史对话）
 remote-cc cc -- remote-control       # -- 后面的参数原样传给 claude
+remote-cc cc -- -w feature-x         # 在新的 git worktree 里工作（建在本机的 <项目>/.claude/worktrees/feature-x）
 remote-cc cc -- --dangerously-skip-permissions   # 容器里是 root 时也能用（remote-cc 会设置 IS_SANDBOX=1，--no-is-sandbox 可关闭）
 remote-cc -p 2222 -i ~/.ssh/key root@服务器 .     # 也可以直接写 ssh 参数，不用 ~/.ssh/config
 remote-cc --profile work cc          # 指定历史 profile（默认每台本机各自一份；none = 用 B 原本的历史）
 remote-cc -v cc                      # 显示过程；-vv / -vvv / -vvvv 同时让 ssh 输出调试信息（相当于 ssh -v / -vv / -vvv）
 ```
 
+**git**：Claude Code 自己调用的 git（判断仓库、读状态、`--worktree` 建 worktree 等）也在本机执行，用的是本机的 git、配置、凭据和 hooks，不经过文件挂载，速度和本地一样；项目目录之外的 git 调用（比如插件市场）仍在 B 上执行。加 `--remote-git` 可以全部改回在 B 上执行。
+
+启动前 remote-cc 会先在本机的 shell 里试跑一条命令，shell 不能用时直接报错（Windows 上用的是 Git for Windows 的 bash，可以用环境变量 `RCC_SHELL` 指定）。
+
 对话历史保存在 B 上，按本机隔离：两台机器即使项目路径相同，也不会看到对方的对话。
 
-A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Windows 是 `%LOCALAPPDATA%\rcc\last.log`，macOS 是 `~/Library/Caches/rcc/last.log`。
+A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Windows 是 `%LOCALAPPDATA%\rcc\last.log`，macOS 是 `~/Library/Caches/rcc/last.log`；上一次会话的日志在同一目录的 `prev.log`。
 
 ### 以浏览器配置的身份运行（remote-claude-browser）
 
@@ -136,6 +141,8 @@ remote-cc logout cc
 remote-cc update                        # 把本机的 remote-cc 换成最新 release（会校验 SHA256SUMS；Windows 上也可以替换正在运行的 exe）
 remote-cc update-server root@服务器     # 拉取最新服务端镜像（包含新版 Claude Code），有变化才重建容器；
                                         # 有会话在进行时会拒绝执行，除非加 --force
+remote-cc update-server --all          # 依次更新本机管理过的所有服务器，最后汇总结果
+remote-cc servers                       # 本机管理过的服务器（setup-server / update-server / server migrate 时记录）
 remote-cc remove-server root@服务器     # 删除容器；加 --purge 连数据一起删除
 ```
 
