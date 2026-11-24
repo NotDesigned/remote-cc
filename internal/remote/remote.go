@@ -119,8 +119,11 @@ func (c *Conn) Facts(script string) (map[string]string, error) {
 
 // Hint explains ssh errors that have a known remote-cc cause.
 func Hint(sshErr string) string {
-	if strings.Contains(sshErr, "stdio forwarding failed") || strings.Contains(sshErr, "open failed: connect failed") {
-		return "\n     The server's gateway could not reach your container: it is stopped or missing." +
+	// Through the gateway (ProxyJump), a container that is down shows as the
+	// forwarded connection closing before any ssh banner ("UNKNOWN port 65535").
+	if strings.Contains(sshErr, "stdio forwarding failed") || strings.Contains(sshErr, "open failed: connect failed") ||
+		strings.Contains(sshErr, "Connection closed by UNKNOWN port 65535") {
+		return "\n     The server's gateway could not reach your container: it is probably stopped or missing." +
 			"\n     The server's admin can start it: " + Prog + " update-server <docker host>" +
 			"\n     (or on that host: docker start rcc-<user>)"
 	}
