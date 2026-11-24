@@ -54,7 +54,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: binaries
-        run: ./scripts/build.sh
+        run: TARGETS=linux/amd64 ./scripts/build.sh
       - name: end-to-end
         run: RCC=dist/rcc-linux-amd64 IMAGE=rcc-test:ci sh test/integration.sh
       - name: diagnostics

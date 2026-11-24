@@ -106,11 +106,6 @@ step "update-server"
 remote-cc update-server --image "$IMAGE" "$ADMIN"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update"
 
-step "remove-server"
-remote-cc remove-server --purge "$ADMIN"
-expect_fail sudo docker inspect remote-cc-gateway >/dev/null 2>&1
-expect_fail sudo docker inspect rcc-owner >/dev/null 2>&1
-
 step "server migrate: a 0.4 single-container deployment"
 ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/single_ed25519
 sdir=/opt/rcc-single sdata=/var/lib/rcc-single
@@ -148,5 +143,10 @@ remote-cc server migrate --install-dir "$sdir" --name rccs --user bob --image "$
 # Same host key (StrictHostKeyChecking would refuse a changed one), same data.
 [ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated data"
 remote-cc remove-server --purge --install-dir "$sdir" "$ADMIN"
+
+step "remove-server (it removes the image too, so it comes last)"
+remote-cc remove-server --purge "$ADMIN"
+expect_fail sudo docker inspect remote-cc-gateway >/dev/null 2>&1
+expect_fail sudo docker inspect rcc-owner >/dev/null 2>&1
 
 step "all passed"
