@@ -77,9 +77,13 @@ remote-cc device remove 服务器-cc 设备         # 按 list 显示的名字�
 ```sh
 remote-cc update-server root@服务器     # 拉取最新镜像（包含新版 Claude Code），只重建有变化的容器；
                                         # 有会话正在进行时会拒绝，除非加 --force
+remote-cc update-server --all          # 本机管理过的所有服务器依次更新；某台失败不影响其他，最后汇总
+remote-cc servers                       # 列出这些服务器；--forget root@服务器 删掉已经不存在的
 remote-cc remove-server root@服务器     # 删除网关和所有用户容器；数据默认保留，--purge 一起删除
 remote-cc server init root@服务器       # 只安装网关，不创建用户
 ```
+
+本机会在 `~/.ssh/remote-cc/servers.json` 里记住你用 `setup-server`、`server init`、`server migrate`、`update-server` 操作过的服务器（ssh 目标、命令行上的 ssh 参数、安装目录），`remove-server` 时删除。0.5.2 之前部署的服务器，对每台执行一次 `update-server 主机` 就会记上。
 
 **从 0.4 及更早的单容器部署迁移**：0.5 不再支持单容器布局，`update-server` 等命令遇到它会提示先迁移：
 

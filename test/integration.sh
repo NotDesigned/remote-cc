@@ -168,11 +168,19 @@ expect_fail remote-cc server init --install-dir "$sdir" "$ADMIN"
 remote-cc server migrate --install-dir "$sdir" --name rccs --user bob --image "$IMAGE" "$ADMIN"
 # Same host key (StrictHostKeyChecking would refuse a changed one), same data.
 [ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated data"
+
+step "update-server --all (the main and the migrated server)"
+remote-cc servers | tee /tmp/servers
+[ "$(grep -c "$ADMIN" /tmp/servers)" = 2 ] || fail "servers should list both installs"
+remote-cc update-server --all --image "$IMAGE"
+[ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update --all"
+[ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated server after update --all"
 remote-cc remove-server --purge --install-dir "$sdir" "$ADMIN"
 
 step "remove-server (it removes the image too, so it comes last)"
 remote-cc remove-server --purge "$ADMIN"
 expect_fail sudo docker inspect remote-cc-gateway >/dev/null 2>&1
 expect_fail sudo docker inspect rcc-owner >/dev/null 2>&1
+remote-cc servers | grep -q "no servers" || fail "remove-server should forget the server"
 
 step "all passed"

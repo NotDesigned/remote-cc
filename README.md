@@ -137,6 +137,8 @@ remote-cc logout cc
 remote-cc update                        # 把本机的 remote-cc 换成最新 release（会校验 SHA256SUMS；Windows 上也可以替换正在运行的 exe）
 remote-cc update-server root@服务器     # 拉取最新服务端镜像（包含新版 Claude Code），有变化才重建容器；
                                         # 有会话在进行时会拒绝执行，除非加 --force
+remote-cc update-server --all          # 依次更新本机管理过的所有服务器，最后汇总结果
+remote-cc servers                       # 本机管理过的服务器（setup-server / update-server / server migrate 时记录）
 remote-cc remove-server root@服务器     # 删除容器；加 --purge 连数据一起删除
 ```
 

@@ -106,6 +106,7 @@ func Setup(c Config, user, alias string, extraKeys []string) error {
 	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
 	}
+	remember(c)
 	f2, err := conn.Elevated(c.addParams(user, append([]string{pub}, extraKeys...)), scripts.Host("server/user-add.sh"))
 	if err != nil {
 		return fmt.Errorf("setup failed while creating user %s: %w", user, err)
@@ -148,6 +149,7 @@ func Init(c Config) error {
 	if err != nil {
 		return fmt.Errorf("server init failed: %w", err)
 	}
+	remember(c)
 	fmt.Printf("gateway is running on port %s, host key %s\nadd users with:  %s user add %s <name>\n",
 		f["port"], sshconf.Fingerprint(f["gwkey"]), remote.Prog, c.Dest)
 	return nil
@@ -345,6 +347,7 @@ func Migrate(c Config, name, alias string, force bool) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "rcc: done. %s is now user %s (%s key(s) carried over); the server keeps its host key.\n", c.Dest, name, f["keys"])
+	remember(c)
 	printConfig(c, name, alias, f)
 	return nil
 }
@@ -363,6 +366,7 @@ func Update(c Config, image string, force bool) error {
 	if err != nil {
 		return fmt.Errorf("update failed: %w", err)
 	}
+	remember(c)
 	switch {
 	case f["uptodate"] == "1":
 		fmt.Printf("remote-cc server is up to date (%s)\n", f["before"])
@@ -385,6 +389,7 @@ func Remove(c Config, purge bool) error {
 	if err != nil {
 		return fmt.Errorf("remove failed: %w", err)
 	}
+	Forget(c.Dest, c.InstallDir)
 	host := c.publicHost()
 	name := host
 	if f["port"] != "" && f["port"] != "22" {

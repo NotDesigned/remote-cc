@@ -51,6 +51,8 @@ servers (run as root or with sudo on the Docker host):
   rcc user invite [--ttl 168h] [server options] user@host NAME
   rcc user list | config NAME | remove [--purge] [--force] NAME ...
   rcc update-server [--force] [--image IMG] [server options] user@host
+  rcc update-server --all [--force] [--image IMG]           every server remembered here
+  rcc servers [--forget user@host]                          servers remembered here (admin side)
   rcc remove-server [--purge] [server options] user@host
   rcc server init [server options] user@host                 gateway only
   rcc server migrate --user NAME [--force] user@host           convert a 0.3/0.4 single-container server
@@ -109,7 +111,7 @@ func Main(args []string, version string) int {
 		return runDevice(rest)
 	case "login", "logout", "status", "setup-token", "token", "accounts":
 		return runAccount(cmd, rest)
-	case "setup-server", "update-server", "remove-server", "server", "user":
+	case "setup-server", "update-server", "remove-server", "server", "user", "servers":
 		return runServer(cmd, rest)
 	}
 	return runSession(args[1:])
@@ -299,12 +301,14 @@ func runServer(cmd string, args []string) int {
 	var c server.Config
 	var port, user, alias, ttl, image string
 	var keys []string
-	var purge, force bool
+	var purge, force, all bool
+	var forget string
 	t, pos, _, err := parse(args, flags{
 		str: map[string]*string{"--install-dir": &c.InstallDir, "--data": &c.DataDir, "--port": &port, "--bind": &c.Bind,
-			"--image": &image, "--public-host": &c.PublicHost, "--name": &c.Name, "--user": &user, "--alias": &alias, "--ttl": &ttl},
+			"--image": &image, "--public-host": &c.PublicHost, "--name": &c.Name, "--user": &user, "--alias": &alias, "--ttl": &ttl,
+			"--forget": &forget},
 		list:  map[string]*[]string{"--key": &keys},
-		bools: map[string]*bool{"--install-docker": &c.InstallDocker, "--purge": &purge, "--force": &force},
+		bools: map[string]*bool{"--install-docker": &c.InstallDocker, "--purge": &purge, "--force": &force, "--all": &all},
 	})
 	if err != nil {
 		return fail(err)
@@ -327,6 +331,21 @@ func runServer(cmd string, args []string) int {
 		return true
 	}
 	switch {
+	case cmd == "servers" && len(pos) == 0:
+		if forget != "" {
+			n, err := server.Forget(forget, c.InstallDir)
+			if err == nil && n == 0 {
+				err = fmt.Errorf("no remembered server %q (see: %s servers)", forget, remote.Prog)
+			}
+			return fail(err)
+		}
+		return fail(server.ListKnown())
+	case cmd == "update-server" && all:
+		if len(pos) != 0 {
+			return fail(errors.New("update-server --all takes no host"))
+		}
+		c.Target = t
+		return fail(server.UpdateAll(c, image, force))
 	case cmd == "setup-server" && need(1):
 		var extra []string
 		for _, kf := range keys {
