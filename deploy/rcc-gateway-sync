@@ -10,12 +10,13 @@ while IFS= read -r u; do
   case "$u" in ''|\#*) continue ;; esac
   printf '%s' "$u" | grep -Eq '^[a-z][a-z0-9-]{0,30}$' || { echo "rcc-gateway-sync: skipping invalid user name '$u'" >&2; continue; }
   if ! id "$u" >/dev/null 2>&1; then
-    useradd --no-create-home --home-dir /nonexistent --shell /bin/sh "$u"
+    useradd --no-create-home --home-dir / --shell /bin/sh "$u"
     usermod -p '*' "$u"          # no password, but not "locked" (sshd refuses locked accounts)
   fi
   # A shell is needed to run the ForceCommand (rcc-gateway-cmd); sshd never
   # runs anything else for these accounts. rcc <= 0.4.1 used nologin.
   [ "$(getent passwd "$u" | cut -d: -f7)" = /bin/sh ] || usermod -s /bin/sh "$u"
+  [ "$(getent passwd "$u" | cut -d: -f6)" = / ] || usermod -d / "$u"   # no "Could not chdir" noise
   printf 'Match User %s\n    PermitOpen rcc-%s:22\n' "$u" "$u" >> "$tmp"
 done < "$list"
 # Remove accounts of users no longer listed (only those we created: uid >= 2000).

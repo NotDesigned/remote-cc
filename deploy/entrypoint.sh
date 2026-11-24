@@ -8,6 +8,8 @@ if [ "${RCC_ROLE:-}" = gateway ]; then
     [ -f "$k" ] || ssh-keygen -q -t "$t" -N '' -f "$k"
   done
   chmod 600 /etc/ssh/keys/*_key
+  # Readable by the gateway accounts (rcc-gateway-cmd hostkey); keys/ is 0700.
+  install -m 644 /etc/ssh/keys/ssh_host_ed25519_key.pub /etc/ssh/rcc_gateway_hostkey.pub
   mkdir -p /etc/remote-cc/gateway /etc/remote-cc/keys
   rcc-gateway-sync
   exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_gateway_config -o PidFile=/run/sshd-gateway.pid

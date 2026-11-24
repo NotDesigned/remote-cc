@@ -252,7 +252,7 @@ B 上直接运行的 claude 看到的还是原来的目录。`--profile none` �
 - **代码整理**：原来的 `internal/session`（约 3000 行，脚本以 Go 字符串嵌在代码里）拆成：
   - `internal/scripts`：所有远端脚本是独立的 `.sh` 文件，通过 go:embed 嵌入，公共部分（提权、Docker 检查、账号环境）放在 `lib/`，CI 里跑 shellcheck。
   - `internal/remote`（ssh 连接、ControlMaster、提权、facts 解析）、`internal/sshconf`（本机 ssh 配置、密钥、邀请码、join）、`internal/server`（管理命令）、`internal/client`（会话、账号、设备）、`internal/cli`（统一的参数解析器，每个命令只声明自己的参数；`main.go` 只剩一行）。
-- **测试改到 CI**：以前的端到端测试都在 server-la 上跑，这台机器同时在为用户提供服务（v0.4.1 的事故就是这样发生的），而且磁盘紧张。现在 `test/integration.sh` 在 GitHub 的 runner 上运行：本地构建镜像，runner 自己既是 Docker 宿主机（通过 sudo 账号 ssh 到 localhost），也是几台"用户的电脑"（几个 Linux 用户），覆盖部署、邀请、隔离、自助设备、真实会话（假 claude）、迁移、更新、移除。
+- **测试改到 CI**：以前的端到端测试都在开发用的那台服务器上跑，它同时在为用户提供服务（v0.4.1 的事故就是这样发生的），而且磁盘紧张。现在 `test/integration.sh` 在 GitHub 的 runner 上运行：本地构建镜像，runner 自己既是 Docker 宿主机（通过 sudo 账号 ssh 到 localhost），也是几台"用户的电脑"（几个 Linux 用户），覆盖部署、邀请、隔离、自助设备、真实会话（假 claude）、迁移、更新、移除。
 
 ## 实现选型
 

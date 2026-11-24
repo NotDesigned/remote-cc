@@ -7,7 +7,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # shellcheck disable=SC2086 # split into words on purpose; rcc-self-invite validates each
     exec sudo -n /usr/local/bin/rcc-self-invite ${SSH_ORIGINAL_COMMAND#invite } ;;
   hostkey)
-    awk '{print $1" "$2}' /etc/ssh/keys/ssh_host_ed25519_key.pub ;;
+    awk '{print $1" "$2}' /etc/ssh/rcc_gateway_hostkey.pub ;;
   *)
     echo "remote-cc gateway: this account can only reach its own container (use it as ProxyJump)" >&2
     exit 1 ;;
