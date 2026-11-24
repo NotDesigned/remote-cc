@@ -27,7 +27,7 @@ if [ -n "$proj" ] && [ "$proj" != "rcc-$NAME" ]; then docker rm -f "rcc-$NAME" >
 grep -qx "$NAME" "$DATA/gateway/etc/users" || echo "$NAME" >> "$DATA/gateway/etc/users"
 docker exec "$GW" rcc-gateway-sync >&2
 cd "$DIR/users/$NAME" && docker compose up -d --pull missing --quiet-pull >&2
-wait_up "rcc-$NAME" || { docker compose logs --tail 30 >&2; exit 4; }
+wait_up "rcc-$NAME" "$GW" || { docker compose logs --tail 30 >&2; exit 4; }
 echo "port=$PORT"
 echo "gwkey=$(pubkey "$DATA/gateway/ssh/ssh_host_ed25519_key.pub")"
 echo "ukey=$(pubkey "$u/ssh/ssh_host_ed25519_key.pub")"

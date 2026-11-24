@@ -32,11 +32,13 @@ active_sessions() {
   docker exec "$1" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); done; echo $n' 2>/dev/null || echo 0
 }
 
-# wait_up CONTAINER...: wait until each has its sshd host key (60s).
+# wait_up CONTAINER...: wait until each one's sshd answers (60s). A host key
+# alone is not enough: the entrypoint generates more keys before sshd starts,
+# and the gateway's sshd re-executes itself after rcc-gateway-sync.
 wait_up() {
   i=0
   for c in "$@"; do
-    until docker exec "$c" test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null; do
+    until [ -n "$(docker exec "$c" ssh-keyscan -T 2 -t ed25519 127.0.0.1 2>/dev/null)" ]; do
       i=$((i+1)); [ $i -gt 60 ] && { echo "rcc: container $c did not come up" >&2; return 1; }
       sleep 1
     done

@@ -48,7 +48,7 @@ Claude 在命令里写的路径、cwd 在两台机器上都成立，所以不需
 
 在 Linux/macOS 上，几次 ssh 调用通过 ControlMaster 复用同一条连接，只认证一次。Windows 自带的 OpenSSH 不支持连接复用，所以会建立多条连接。
 
-### 一次会话的完整流程（`internal/session`）
+### 一次会话的完整流程（`internal/client`）
 
 1. **probe**：一次 ssh 调用，收集 B 的 OS/arch、uid、HOME、sshfs/unshare/nsenter 是否存在、claude 路径（依次尝试 PATH、`$SHELL -lc`、`$SHELL -ic` 和几个常见位置）、已安装 shim 的 sha256。缺什么就给出明确报错。
 2. **prepare**：清理以前崩溃留下的 run 目录；在 umask 077 下创建 `~/.cache/rcc/run/<id>/`；通过 **stdin** 写入 token（不出现在任何命令行里）。如果 hash 不一致，再从 stdin 上传 shim。
@@ -60,12 +60,10 @@ Claude 在命令里写的路径、cwd 在两台机器上都成立，所以不需
 
 B 端的脚本统一用 `sh -c 'eval "$(printf %s <base64> | base64 -d)"'` 发送，所以不管用户的登录 shell 是 bash、zsh 还是 fish 都能运行。
 
-### 挂载模式
+### 挂载方式
 
-| 模式 | 条件 | 做法 |
-| --- | --- | --- |
-| `ns`（B 为 root 时默认） | root，且有 unshare/nsenter | sshfs 跑在 `unshare -m --propagation private` 创建的私有挂载命名空间里，claude 通过 `nsenter -t <sshfs pid> -m` 进入同一个命名空间。B 的全局文件系统视图完全不受影响，同一路径即使已经在 B 上存在也不会被覆盖，A 和 B 是同一台机器时也能用。 |
-| `global` | 非 root | 普通挂载。路径必须能创建，而且必须是空目录（rcc 不会覆盖非空目录）。 |
+sshfs 跑在 `unshare -m --propagation private` 创建的私有挂载命名空间里，claude 通过 `nsenter -t <sshfs pid> -m` 进入同一个命名空间。B 的全局文件系统视图完全不受影响，同一路径即使已经在 B 上存在也不会被覆盖，A 和 B 是同一台机器时也能用。
+这需要 B 上是 root（服务端容器里就是 root），并且有 unshare/nsenter。0.5 之前还有一个非 root 的 `global` 模式（普通挂载，不能隔离历史），已经删除：服务端统一是容器。
 
 ## 命令通道细节（已在 Claude Code 2.1.330 二进制里核实）
 
@@ -138,7 +136,7 @@ shim 的职责：
 ## 告诉 Claude 工具实际作用在哪里
 
 Claude 的系统提示词里有一段环境信息（平台、OS 版本），描述的是 B。如果不另外说明，Claude 会按 B 的系统来写命令，比如在 Windows 或 macOS 的 A 上用 `apt`、GNU 版的 `sed -i`。
-rcc 默认通过 `--append-system-prompt` 追加一段固定的说明（`internal/session/prompt.go`），内容如下：
+rcc 默认通过 `--append-system-prompt` 追加一段固定的说明（`internal/client/prompt.go`），内容如下：
 - Bash 在哪台机器上执行：A 的 OS 和版本、架构、主机名、shell。
 - 上面那段环境信息描述的是远程主机。
 - 项目目录内的文件工具作用于 A；目录外的路径作用于 B，访问 A 上的其它位置要用 Bash。
@@ -168,7 +166,6 @@ B 上直接运行的 claude 看到的还是原来的目录。`--profile none` �
 已实测：用两个 profile、相同路径跑三次。A1 让 Claude 记住一个暗号；A2 执行 `--continue` 时没有接上 A1 的对话；A1 执行 `--continue` 正确答出了暗号。B 原本的 `projects/` 没有新增内容。
 
 还没隔离的部分：`~/.claude.json` 里按项目路径记录的状态（是否已信任该目录、项目级允许的工具等）仍然共用。
-global 模式（B 非 root）没有私有命名空间，无法做 bind mount，会打印警告，然后使用共享的历史。
 
 ## 多账号
 
@@ -176,14 +173,14 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 解决办法是每个账号在 B 上有自己的配置目录 `~/.local/share/rcc/accounts/<name>/`，claude 通过 `CLAUDE_CONFIG_DIR` 使用它。
 已从二进制代码和实测两方面确认：设置 `CLAUDE_CONFIG_DIR` 后，`.claude.json` 和 `.credentials.json` 都会放到这个目录里；指向空目录时 `auth status` 显示 `loggedIn: false`，默认账号不受影响。
 
-- 选择账号：`--account NAME`，或者 A 上的环境变量 `RCC_ACCOUNT`。不指定或指定为 `default` 时，使用 B 原来的配置目录，和以前一样。非 root 的 global 模式同样支持。
+- 选择账号：`--account NAME`，或者 A 上的环境变量 `RCC_ACCOUNT`。不指定时使用本机专属账号（见 v0.3.0 一节），`default` 使用 B 原来的配置目录。
 - 共享的个人配置：`settings.json`、`CLAUDE.md`、`keybindings.json`、`skills/`、`agents/`、`commands/`、`plugins/`、`output-styles/` 通过软链接指向默认配置目录，只链接实际存在的项，已有的文件不会被覆盖。
   所以把某个链接换成真实文件，就能让这个账号单独使用该配置。注意：如果 Claude 用"写临时文件再改名"的方式保存 `settings.json`，链接会被替换成真实文件，之后这一项就不再共享（不会损坏数据）。
   用户级的 MCP 服务器保存在 `.claude.json` 里，不会共享，每个账号要单独添加。
 - 历史：在 ns 模式下 profile 变成 `<profile>@<account>`，同一台 A 在不同账号下的历史互不可见。
 - 账号命令都只通过 ssh 直接执行，不挂载目录、不启动 agent：
   `rcc login|logout|status|setup-token [--account N] host`，对应 `claude auth …` / `claude setup-token`；
-  `rcc token --account N host` 在 A 上以隐藏方式读入令牌，通过 stdin 存到账号目录的 `.rcc-oauth-token`（权限 0600），之后会话里导出为 `CLAUDE_CODE_OAUTH_TOKEN`，`-- --clear` 删除；
+  `rcc token --account N host` 在 A 上以隐藏方式读入令牌，通过 stdin 存到账号目录的 `.rcc-oauth-token`（权限 0600），之后会话里导出为 `CLAUDE_CODE_OAUTH_TOKEN`，`--clear` 删除；
   `rcc accounts host` 列出所有账号的登录状态、邮箱、组织、套餐，以及是否保存了令牌。
 - 已实测：新账号目录的建立和链接、令牌的保存与清除（权限 600）、accounts 列表、会话里 `CLAUDE_CONFIG_DIR` 和令牌的传递以及历史 profile（用一个打印环境的假 claude 验证）、`login` 能在 A 的终端显示 `https://claude.ai/oauth/authorize` 并等待粘贴授权码。
   真实账号的授权和使用没有测，因为需要在浏览器里完成。`auth status` 对令牌只检查是否配置，不检查是否有效（假令牌也会显示 loggedIn），这一点和 cc-desk-tunnel 文档里的说明一致。
@@ -201,13 +198,13 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
   所以改用 `AllowTcpForwarding remote` + `PermitListen none`：unix socket 路径不受 PermitListen 限制，TCP 监听全部被拒绝；local 转发本来就不在 `remote` 允许范围内。
   实测：`-R` unix socket 可用，`-R` TCP 端口被拒绝，`-L` 在实际使用时被拒绝（administratively prohibited）。
 - **`rcc setup-server`**：一条命令完成部署和更新。compose.yml 通过 go:embed 打包在 rcc 里；公钥直接写进数据卷（不放 .env）。
-  容器的主机公钥通过已经验证过的 root ssh 连接取得，并写进本机 `known_hosts`，以 `[host]:port` 为键。`--migrate-history` 会复制宿主机上以前的 rcc 历史 profile。
+  容器的主机公钥通过已经验证过的 root ssh 连接取得，并写进本机 `known_hosts`，以 `[host]:port` 为键。（0.5 起服务端只有多用户布局，见下文。）
 - **已实测**（A 和 B 是同一台机器，用本地构建的镜像，容器只监听 127.0.0.1）：setup-server 部署完成、known_hosts 写入，并在开启主机密钥校验的情况下连接成功。
   在容器里通过挂载读写了 A 的文件，通过 shim 在 A 上执行了命令，迁移的历史 profile 也挂上了；会话结束后容器里没有残留。
   容器里的 claude 还没登录，所以会话这部分用一个假 claude 测试；真实 claude 只测了 `--version` 和 `auth status`。
 - **非 root 宿主机**：setup 脚本发现登录用户不是 root 时会提权重跑。脚本把自己（参数加正文）以 base64 嵌进去，再用 `sudo -n env … sh -c` 执行；需要密码时用 `sudo -S`，密码由 rcc 在本机以隐藏方式读入后经 stdin 传入。
   脚本第一次运行时如果发现需要密码，会输出一个标记后退出，rcc 看到标记再询问密码重跑。登录用户自己的 `authorized_keys` 和 rcc 历史在提权前读出，或者通过 `ORIG_HOME` 传给提权后的脚本。
-  实测用了两个临时用户：免密 sudo 时，`--keys-from-host` 和 `--migrate-history` 都取自该用户的家目录；需要密码时，未提供密码、密码错误、密码正确三种情况都符合预期，密码没有出现在进程列表和日志里。
+  实测用了两个临时用户：需要密码时，未提供密码、密码错误、密码正确三种情况都符合预期，密码没有出现在进程列表和日志里。
 - **磁盘**：在 B 上本地构建会临时产生约 2GB 的构建缓存，开发时一度把这台机器的磁盘写满了。所以镜像改由 CI 构建，服务器只拉取。
 
 ## 凭据默认按机器分开、shim 按内容寻址、更新命令（v0.3.0）
@@ -228,21 +225,34 @@ global 模式（B 非 root）没有私有命名空间，无法做 bind mount，�
 ## 多用户服务器（v0.4.0）
 
 需求：多台服务器，每台上有固定的几个用户，用户是其他人。共用一个容器做不到隔离，因为所有人都是容器里的 root；一人一个容器、每个容器一个端口，又需要逐个去云防火墙放行端口。
-方案是在每台服务器上放一个**标准 OpenSSH 的网关**，独占唯一的对外端口，每个用户一个容器，挂在私有网络 `remote-cc` 上。具体做法和实测结果见 [deploy/README.md](../deploy/README.md#多用户模式)。几个要点：
+方案是在每台服务器上放一个**标准 OpenSSH 的网关**，独占唯一的对外端口，每个用户一个容器，挂在私有网络 `remote-cc` 上。具体做法见 [deploy/README.md](../deploy/README.md)。几个要点：
 
 - **只用一个镜像**：网关和用户容器用同一个镜像，靠 `RCC_ROLE=gateway` 区分角色。网关由 `rcc-gateway-sync` 根据 `users` 列表维护 Linux 账号，并为每个账号生成 `Match User`/`PermitOpen` 规则。
 - **邀请码只用 OpenSSH 自带的功能**：`authorized_keys` 里的 `restrict`、`command=`、`permitopen=`、`expiry-time=` 这几个选项，加上容器里的 `rcc-enroll`。
-  测试时发现一个问题：一次性密钥的转发权限原本写在网关和容器共用的那个文件里，于是在容器里也生效了，持有者可以在登记前往用户的容器里放一个 `-R` socket。现在拆成两半：网关那一半放在容器看不到的 `<用户>.invites` 文件里，容器这一半不允许任何转发。
+  测试时发现一个问题：一次性密钥的转发权限原本写在网关和容器共用的那个文件里，于是在容器里也生效了，持有者可以在登记前往用户的容器里放一个 `-R` socket。现在拆成两半：网关那一半放在容器看不到的 `<data>/invites/<用户>` 文件里，容器这一半不允许任何转发。
 - **迁移**：先拉取镜像、检查镜像是否支持多用户，然后备份，再停止旧容器。服务器原来的主机密钥同时交给网关和用户容器，原来的公钥成为这个用户的公钥。任何一步失败都会回滚。
 - **`join` 默认别名带 `-cc` 后缀**：它的配置是在 `~/.ssh/config` 最前面 Include 进来的，如果和用户已有的、指向宿主机的别名同名，会抢先生效并把那个别名覆盖掉。
 
 ## v0.4.1：setup-server 默认多用户；compose 项目名冲突事故
 
-- **`setup-server` 默认等于 `server init` + 为管理员创建用户 + 在本机写好配置**。管理员本人就是第一个用户，不需要邀请码：直接在本机生成专用密钥并授权给这个用户。网关端口不通时，自动改用 ProxyJump。`--single` 保留旧的单容器布局。
+- **`setup-server` 默认等于 `server init` + 为管理员创建用户 + 在本机写好配置**。管理员本人就是第一个用户，不需要邀请码：直接在本机生成专用密钥并授权给这个用户。网关端口不通时，自动改用 ProxyJump。
 - **事故**：在 server-la 上测试时，测试实例的用户用了默认名 `owner`。docker compose 默认用目录名作项目名，于是测试实例的 `users/owner` 和真实部署的 `users/owner` 被当成同一个项目，`up -d` 把真实的 `rcc-owner` 重建成了测试配置（挂载测试数据、接入测试网络）。持续约 2 分钟，期间没有用户连接，真实数据目录也没有被写入，随后已恢复。
   同一类问题在正式使用中也可能出现：用户名和宿主机上已有的 compose 项目同名（比如 `kavita`）时，`user remove` 里的 `--remove-orphans` 可能删掉别人的容器。
   修复：每个用户容器显式使用项目名 `rcc-<用户>`，网关使用 `<网络名>`；新增 `owned_by` 检查，同名容器如果属于别的部署目录，或者不是 remote-cc 创建的，一律拒绝；所有地方都不再使用 `--remove-orphans`；`user invite` 不再改动容器。老部署在下次 `update-server` 时迁移项目名，这一步本来就会先检查活跃会话。
   回归测试：在测试实例里创建 `owner` 会被拒绝，真实容器的创建时间不变；创建和删除名为 `kavita` 的用户，不影响真正的 kavita 容器。
+
+## v0.5.0：自助加设备；去掉单容器；代码整理；CI 端到端测试
+
+- **两层身份**：用户 = 容器（按名字）；Claude 登录和对话历史默认按机器分开。所以"同一个人换一台电脑"只需要把新电脑的密钥加进这个用户，进入的是同一个容器，Claude 那边的表现和在新电脑上直接装 Claude Code 一样（重新登录、历史各自独立，需要时用 `--account`/`--profile` 共用）。
+- **自助加设备**：`device invite` 在已登记的电脑上生成一次性密钥，邀请码的两半分别写入：
+  - 网关一半：网关账号原来没有任何命令可执行，现在 ForceCommand 是 `rcc-gateway-cmd`，只接受 `hostkey` 和 `invite <类型> <公钥> <id> <小时>`。后者通过 sudo 调用 `rcc-self-invite`（sudoers 只放行这一个程序），它从 `SUDO_USER` 取账号名，只为调用者自己写 `<data>/invites/<用户>`，严格校验参数，每个用户最多 5 条未过期邀请。网关对 invites 目录可写，对公钥目录依然只读。
+  - 容器一半：在用户自己的容器里写（用户本来就是容器里的 root）。
+  - `device list` / `device remove` 读写用户容器里的公钥文件；写回时带上读取时的 sha256 做比较交换，防止并发修改互相覆盖；不允许删掉最后一台设备，删本机需要 `--force`。
+- **去掉单容器和 global 模式**：`setup-server --single`、`--keys-from-host`、`--migrate-history`、非 root 的 global 挂载都删除了。单容器部署只剩一条路：`server migrate`。其他命令遇到单容器部署会提示先迁移。
+- **代码整理**：原来的 `internal/session`（约 3000 行，脚本以 Go 字符串嵌在代码里）拆成：
+  - `internal/scripts`：所有远端脚本是独立的 `.sh` 文件，通过 go:embed 嵌入，公共部分（提权、Docker 检查、账号环境）放在 `lib/`，CI 里跑 shellcheck。
+  - `internal/remote`（ssh 连接、ControlMaster、提权、facts 解析）、`internal/sshconf`（本机 ssh 配置、密钥、邀请码、join）、`internal/server`（管理命令）、`internal/client`（会话、账号、设备）、`internal/cli`（统一的参数解析器，每个命令只声明自己的参数；`main.go` 只剩一行）。
+- **测试改到 CI**：以前的端到端测试都在 server-la 上跑，这台机器同时在为用户提供服务（v0.4.1 的事故就是这样发生的），而且磁盘紧张。现在 `test/integration.sh` 在 GitHub 的 runner 上运行：本地构建镜像，runner 自己既是 Docker 宿主机（通过 sudo 账号 ssh 到 localhost），也是几台"用户的电脑"（几个 Linux 用户），覆盖部署、邀请、隔离、自助设备、真实会话（假 claude）、迁移、更新、移除。
 
 ## 实现选型
 
@@ -329,5 +339,5 @@ MCP 方案可以作为"B 上没有 FUSE"时的降级模式，放到后续里程�
 - Windows 和 macOS 作为 A 端目前只验证到交叉编译通过，还没在真机上跑过。
 - 指向项目目录外的软链在 B 上会解析到 B 自己的文件系统。
 - 大仓库里 Glob/Grep 走 sshfs 会比较慢（见 M4）。
-- B 非 root（global 模式）时，对话历史不能按 A 隔离。
+- B 上必须是 root（服务端容器里就是 root）。
 - claude 在 B 上用的是非登录 ssh 会话的环境。认证一般靠 `~/.claude/.credentials.json`，没有影响；但如果 API key 只写在 `.bashrc` 里，claude 就读不到。
