@@ -128,6 +128,14 @@ remote-cc user remove --purge "$ADMIN" alice
 expect_fail as alice ssh -o BatchMode=yes "$alias" true
 expect_fail sudo docker inspect rcc-alice >/dev/null 2>&1
 
+step "a stopped container: clear error, update-server starts it"
+sudo docker stop rcc-owner >/dev/null
+if out=$(cd "$proj" && remote-cc --claude /usr/local/bin/fake-claude "$alias" 2>&1); then fail "connected to a stopped container"; fi
+case "$out" in *"could not reach your container"*) ;; *) fail "no hint for a stopped container: $out" ;; esac
+remote-cc update-server --image "$IMAGE" "$ADMIN" | tee /tmp/upd
+grep -q "started stopped container(s): rcc-owner" /tmp/upd || fail "update-server did not start rcc-owner"
+[ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after start"
+
 step "update-server"
 remote-cc update-server --image "$IMAGE" "$ADMIN"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update"

@@ -1,6 +1,7 @@
 # shellcheck shell=sh
-# Pulls the image and recreates the gateway / user containers only when the
-# image or compose files changed; refuses while sessions run (unless FORCE).
+# Starts stopped containers, pulls the image and recreates the gateway / user
+# containers only when the image or compose files changed; refuses while
+# sessions run (unless FORCE).
 : "${DIR:?}" "${IMAGE?}" "${FORCE:?}" "${COMPOSE_GW_B64:?}" "${COMPOSE_USER_B64:?}"
 load_server
 cd "$DIR" || exit 3
@@ -20,6 +21,18 @@ for n in $users; do
   { [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] &&
     [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] && [ "$(project "rcc-$n")" = "rcc-$n" ]; } || changed="$changed $n"
 done
+# Containers that exist but were stopped (docker stop, or they crashed past
+# their restart policy) are started first: that needs no recreate.
+started=""
+for c in "$GW" $(for n in $users; do echo "rcc-$n"; done); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = false ] || continue
+  docker start "$c" >/dev/null && started="$started $c"
+done
+if [ -n "$started" ]; then
+  # shellcheck disable=SC2086 # one name per word
+  wait_up $started || exit 4
+  echo "started=${started# }"
+fi
 [ -n "$changed" ] || { echo "uptodate=1"; exit 0; }
 busy=""
 for n in $users; do

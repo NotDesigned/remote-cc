@@ -367,6 +367,9 @@ func Update(c Config, image string, force bool) error {
 		return fmt.Errorf("update failed: %w", err)
 	}
 	remember(c)
+	if f["started"] != "" {
+		fmt.Printf("started stopped container(s): %s\n", f["started"])
+	}
 	switch {
 	case f["uptodate"] == "1":
 		fmt.Printf("remote-cc server is up to date (%s)\n", f["before"])
