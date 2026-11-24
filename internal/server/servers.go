@@ -147,7 +147,11 @@ func UpdateAll(base Config, image string, force bool) error {
 		if r.err != nil {
 			st, failed = "FAILED: "+firstLine(r.err.Error()), failed+1
 		}
-		fmt.Printf("  %-40s %s\n", r.k.Dest, st)
+		name := r.k.Dest
+		if r.k.InstallDir != "/opt/remote-cc" {
+			name += " " + r.k.InstallDir
+		}
+		fmt.Printf("  %-40s %s\n", name, st)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d servers failed (servers with active sessions are skipped unless --force)", failed, len(res))
