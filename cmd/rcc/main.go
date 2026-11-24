@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"remote-cc/internal/agent"
 	"remote-cc/internal/update"
@@ -53,6 +54,8 @@ func main() {
 		os.Exit(runServe(os.Args[2:]))
 	case "shim":
 		os.Exit(runShim(os.Args[2:]))
+	case "join":
+		os.Exit(runJoin(os.Args[2:]))
 	case "setup-server":
 		os.Exit(runSetupServer(os.Args[2:]))
 	case "remove-server":
@@ -145,8 +148,15 @@ server (Docker):
                    refuses while sessions are running unless --force
 
 multi-user servers (one gateway port, one container per user):
+  (all accept --public-host NAME: the address users connect to, when it
+   differs from how you reach the host, e.g. administering via localhost)
   rcc server init [--port 2222] [--bind ADDR] [ssh options] user@host
+  rcc server migrate --user NAME [--force] [ssh options] user@host
+                  turn a single-user deployment into a multi-user one
   rcc user add    [--key FILE.pub]... [--alias NAME] [ssh options] host user
+                  (no --key: prints a one-time invite for the user)
+  rcc user invite [--ttl 168h] [--alias NAME] [ssh options] host user
+  rcc join [--alias NAME] <invite>       on the user's machine: enroll and configure
   rcc user list   [ssh options] host
   rcc user config [--alias NAME] [ssh options] host user
   rcc user remove [--purge] [--force] [ssh options] host user
@@ -489,6 +499,8 @@ func splitMulti(args []string, extra map[string]*[]string, bools map[string]*boo
 			mc.Bind = val()
 		case "--image":
 			mc.Image = val()
+		case "--public-host":
+			mc.PublicHost = val()
 		default:
 			rest = append(rest, a)
 		}
@@ -506,18 +518,41 @@ func fail(err error) int {
 	return 0
 }
 
-// runServerCmd: rcc server init [--port N] [--bind A] [--data D] [--image I] [ssh options] host
+// runServerCmd: rcc server init|migrate ...
 func runServerCmd(args []string) int {
-	if len(args) == 0 || args[0] != "init" {
-		fmt.Fprintln(os.Stderr, "usage: "+prog()+" server init [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc] [--image IMG] [ssh options] user@host")
+	usage := func() int {
+		fmt.Fprintf(os.Stderr, `usage:
+  %[1]s server init    [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc] [--image IMG] [ssh options] user@host
+  %[1]s server migrate --user NAME [--alias NAME] [--force] [--image IMG] [ssh options] user@host
+                 convert a single-user deployment: its owner becomes user NAME
+`, prog())
 		return 2
 	}
-	mc, pos, ok := splitMulti(args[1:], nil, nil)
+	if len(args) == 0 {
+		return usage()
+	}
+	var user, alias []string
+	var force bool
+	mc, pos, ok := splitMulti(args[1:], map[string]*[]string{"--user": &user, "--alias": &alias}, map[string]*bool{"--force": &force})
 	if !ok || len(pos) != 1 {
-		return runServerCmd(nil)
+		return usage()
 	}
 	mc.Destination = pos[0]
-	return fail(session.ServerInit(mc))
+	switch args[0] {
+	case "init":
+		return fail(session.ServerInit(mc))
+	case "migrate":
+		if len(user) == 0 {
+			fmt.Fprintln(os.Stderr, "rcc: server migrate needs --user NAME (the name the current owner gets)")
+			return 2
+		}
+		a := ""
+		if len(alias) > 0 {
+			a = alias[len(alias)-1]
+		}
+		return fail(session.ServerMigrate(mc, user[len(user)-1], a, force))
+	}
+	return usage()
 }
 
 // runUserCmd: rcc user add|list|remove|config ...
@@ -526,6 +561,8 @@ func runUserCmd(args []string) int {
 		p := prog()
 		fmt.Fprintf(os.Stderr, `usage:
   %[1]s user add    [--key FILE.pub]... [--alias NAME] [ssh options] host user
+                    (without --key it prints a one-time invite)
+  %[1]s user invite [--ttl 168h] [--alias NAME] [ssh options] host user
   %[1]s user list   [ssh options] host
   %[1]s user config [--alias NAME] [ssh options] host user
   %[1]s user remove [--purge] [--force] [ssh options] host user
@@ -535,9 +572,9 @@ func runUserCmd(args []string) int {
 	if len(args) == 0 {
 		return usage()
 	}
-	var keys, alias []string
+	var keys, alias, ttlv []string
 	var purge, force bool
-	mc, pos, ok := splitMulti(args[1:], map[string]*[]string{"--key": &keys, "--alias": &alias},
+	mc, pos, ok := splitMulti(args[1:], map[string]*[]string{"--key": &keys, "--alias": &alias, "--ttl": &ttlv},
 		map[string]*bool{"--purge": &purge, "--force": &force})
 	if !ok {
 		return usage()
@@ -555,6 +592,21 @@ func runUserCmd(args []string) int {
 		}
 		mc.Destination = pos[0]
 		return fail(session.UserList(mc))
+	case "invite":
+		if len(pos) != 2 {
+			return usage()
+		}
+		mc.Destination = pos[0]
+		ttl := 7 * 24 * time.Hour
+		if t := last(ttlv); t != "" {
+			d, err := time.ParseDuration(t)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "rcc: bad --ttl (e.g. 24h, 168h)")
+				return 2
+			}
+			ttl = d
+		}
+		return fail(session.UserInvite(mc, pos[1], last(alias), ttl))
 	case "add", "config", "remove":
 		if len(pos) != 2 {
 			return usage()
@@ -570,6 +622,28 @@ func runUserCmd(args []string) int {
 		}
 	}
 	return usage()
+}
+
+// runJoin: rcc join [--alias NAME] <invite>
+func runJoin(args []string) int {
+	alias, inv := "", ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--alias" && i+1 < len(args):
+			i++
+			alias = args[i]
+		case inv == "" && !strings.HasPrefix(args[i], "-"):
+			inv = args[i]
+		default:
+			fmt.Fprintln(os.Stderr, "usage: "+prog()+" join [--alias NAME] <invite>")
+			return 2
+		}
+	}
+	if inv == "" {
+		fmt.Fprintln(os.Stderr, "usage: "+prog()+" join [--alias NAME] <invite>")
+		return 2
+	}
+	return fail(session.Join(inv, alias))
 }
 
 func runShim(args []string) int {

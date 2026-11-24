@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"remote-cc/deploy"
 )
@@ -29,6 +30,16 @@ type MultiConfig struct {
 	Port       int
 	Bind       string
 	Image      string
+	// PublicHost is the address users connect to; default: what ssh resolves
+	// the admin destination to (wrong when administering via localhost).
+	PublicHost string
+}
+
+func (mc *MultiConfig) publicHost() string {
+	if mc.PublicHost != "" {
+		return mc.PublicHost
+	}
+	return resolveHostname(mc.SSH, mc.SSHArgs, mc.Destination)
 }
 
 const multiPrelude = sudoPrelude + `
@@ -126,11 +137,125 @@ fi
 # Revoke access first: gateway account and keys.
 sed -i "/^$NAME\$/d" "$DATA/gateway/etc/users"
 docker exec remote-cc-gateway rcc-gateway-sync >&2 || true
-rm -rf "$DATA/keys/$NAME"
+rm -rf "$DATA/keys/$NAME" "$DATA/keys/$NAME.invites"
 if [ -d "$DIR/users/$NAME" ]; then (cd "$DIR/users/$NAME" && docker compose down --remove-orphans >&2); rm -rf "$DIR/users/$NAME"; fi
 if [ "$PURGE" = 1 ]; then rm -rf "$DATA/users/$NAME"; echo "rcc: deleted $NAME's data (Claude login, history)" >&2
 else echo "rcc: kept $NAME's data in $DATA/users/$NAME (delete with --purge; 'user add' reuses it)" >&2; fi
 `
+
+// serverMigrateScript turns a single-user deployment into a multi-user one
+// whose only user is the previous owner. Same data, same public port, and the
+// server's host key moves to the gateway, so existing known_hosts entries for
+// [host]:port stay valid. Rolls back to the single deployment on failure.
+const serverMigrateScript = multiPrelude + `
+[ -f "$DIR/compose.yml" ] && [ -f "$DIR/.env" ] || { echo "rcc: no remote-cc deployment in $DIR" >&2; exit 3; }
+[ -f "$DIR/multi-user" ] && { echo "rcc: $DIR is already a multi-user server" >&2; exit 3; }
+envget() { sed -n "s/^$1=//p" "$DIR/.env"; }
+old=$(envget RCC_NAME); old=${old:-remote-cc}
+DATA=$(envget RCC_DATA); PORT=$(envget RCC_PORT); PORT=${PORT:-2222}
+BIND=$(envget RCC_BIND); PUBLISH=$(envget RCC_PUBLISH)
+case "$BIND" in ""|0.0.0.0) pub_default="$PORT:22" ;; *) pub_default="$BIND:$PORT:22" ;; esac
+PUBLISH=${PUBLISH:-$pub_default}
+[ -n "$DATA" ] && [ -d "$DATA/root" ] && [ -d "$DATA/ssh" ] || { echo "rcc: unexpected layout in $DATA" >&2; exit 3; }
+[ -e "$DATA/users/$NAME" ] && { echo "rcc: $DATA/users/$NAME already exists" >&2; exit 3; }
+
+active=$(docker exec "$old" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); done; echo $n' 2>/dev/null || echo 0)
+if [ "${active:-0}" -gt 0 ] && [ "$FORCE" != 1 ]; then
+  echo "rcc: $active active session(s) in $old would be disconnected; retry when they end, or pass --force" >&2; exit 5
+fi
+
+echo "rcc: fetching $IMAGE before stopping anything …" >&2
+docker pull -q "$IMAGE" >&2 2>/dev/null || docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "rcc: cannot get image $IMAGE" >&2; exit 4; }
+docker run --rm --entrypoint test "$IMAGE" -x /usr/local/bin/rcc-gateway-sync || { echo "rcc: $IMAGE has no multi-user support; update the image first" >&2; exit 4; }
+
+ts=$(date +%Y%m%d%H%M%S)
+backup="$(dirname "$DATA")/remote-cc-before-multi-user-$ts.tgz"
+need=$(du -sk "$DATA/root" "$DATA/ssh" | awk '{s+=$1} END {print s}')
+avail=$(df -Pk "$(dirname "$DATA")" | awk 'NR==2 {print $4}')
+[ "$avail" -gt $((need * 2 + 102400)) ] || { echo "rcc: not enough disk for a backup ($need KB needed)" >&2; exit 4; }
+tar -C "$DATA" -czf "$backup" root ssh
+chmod 600 "$backup"
+mkdir -p "$DIR/.single-$ts" && cp -a "$DIR/compose.yml" "$DIR/.env" "$DIR/.single-$ts/"
+echo "backup=$backup"
+
+u="$DATA/users/$NAME"
+rollback() {
+  echo "rcc: migration failed, restoring the single-user deployment …" >&2
+  (cd "$DIR" && docker compose down >/dev/null 2>&1) || true
+  [ -d "$DIR/users/$NAME" ] && (cd "$DIR/users/$NAME" && docker compose down >/dev/null 2>&1) || true
+  [ -d "$u/root" ] && mv "$u/root" "$DATA/root"
+  [ -d "$u/ssh" ] && mv "$u/ssh" "$DATA/ssh"
+  rm -rf "$u" "$DATA/keys/$NAME" "$DATA/gateway" "$DIR/users" "$DIR/multi-user"
+  rmdir "$DATA/users" "$DATA/keys" 2>/dev/null || true
+  cp -a "$DIR/.single-$ts/compose.yml" "$DIR/.single-$ts/.env" "$DIR/"
+  (cd "$DIR" && docker compose up -d >&2)
+  exit 6
+}
+
+(cd "$DIR" && docker compose down >&2) || { echo "rcc: could not stop $old" >&2; exit 4; }
+umask 022
+{
+  mkdir -p "$u" "$DATA/keys/$NAME" "$DATA/gateway/etc" "$DATA/gateway/ssh" "$DIR/users/$NAME" &&
+  chmod 700 "$DATA/users" "$u" "$DATA/gateway/ssh" &&
+  mv "$DATA/root" "$u/root" && mv "$DATA/ssh" "$u/ssh" &&
+  cp -a "$u/ssh/." "$DATA/gateway/ssh/" &&
+  { grep -vE '^[[:space:]]*(#|$)' "$u/root/.ssh/authorized_keys" 2>/dev/null || true; } > "$DATA/keys/$NAME/authorized_keys" &&
+  chmod 755 "$DATA/keys" "$DATA/keys/$NAME" && chmod 644 "$DATA/keys/$NAME/authorized_keys" &&
+  echo "$NAME" > "$DATA/gateway/etc/users" &&
+  printf '%s' "$COMPOSE_GW_B64" | base64 -d > "$DIR/compose.yml" &&
+  printf 'RCC_PORT=%s
+RCC_PUBLISH=%s
+RCC_DATA=%s
+RCC_IMAGE=%s
+' "$PORT" "$PUBLISH" "$DATA" "$IMAGE" > "$DIR/.env" &&
+  touch "$DIR/multi-user" &&
+  printf '%s' "$COMPOSE_USER_B64" | base64 -d > "$DIR/users/$NAME/compose.yml" &&
+  printf 'RCC_NAME=rcc-%s
+RCC_DATA=%s
+RCC_KEYS=%s
+RCC_IMAGE=%s
+' "$NAME" "$u" "$DATA/keys/$NAME" "$IMAGE" > "$DIR/users/$NAME/.env" &&
+  { docker network inspect remote-cc >/dev/null 2>&1 || docker network create remote-cc >/dev/null; } &&
+  (cd "$DIR" && docker compose up -d >&2) &&
+  (cd "$DIR/users/$NAME" && docker compose up -d >&2)
+} || rollback
+i=0
+until docker exec remote-cc-gateway test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null && docker exec "rcc-$NAME" test -s /etc/ssh/keys/ssh_host_ed25519_key.pub 2>/dev/null; do
+  i=$((i+1)); [ $i -gt 60 ] && rollback
+  sleep 1
+done
+echo "port=$PORT"
+echo "gwkey=$(awk '{print $1" "$2}' "$DATA/gateway/ssh/ssh_host_ed25519_key.pub")"
+echo "ukey=$(awk '{print $1" "$2}' "$u/ssh/ssh_host_ed25519_key.pub")"
+echo "keys=$(grep -c . "$DATA/keys/$NAME/authorized_keys")"
+`
+
+// ServerMigrate converts a single-user deployment into a multi-user server
+// whose first user is the previous owner (data, logins, history kept).
+func ServerMigrate(mc MultiConfig, name, alias string, force bool) error {
+	if err := validUser(name); err != nil {
+		return err
+	}
+	s, cleanup, err := mc.session()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	fmt.Fprintf(os.Stderr, "rcc: migrating %s to multi-user mode (first user: %s) …\n", mc.Destination, name)
+	out, err := s.runElevated(vars("DIR", mc.InstallDir, "NAME", name, "IMAGE", mc.Image, "FORCE", boolStr(force),
+		"COMPOSE_GW_B64", base64Std(deploy.ComposeGateway), "COMPOSE_USER_B64", base64Std(deploy.ComposeUser)), serverMigrateScript)
+	f := parseFacts(out)
+	if f["backup"] != "" {
+		fmt.Fprintf(os.Stderr, "rcc: backup of the previous data: %s (on the server)\n", f["backup"])
+	}
+	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "rcc: done. %s is now user %s (%s key(s) carried over); the server keeps its host key.\n", mc.Destination, name, f["keys"])
+	fmt.Fprintf(os.Stderr, "rcc: the old ssh config for this server (User root, Port %s) must be replaced by the one below.\n", f["port"])
+	printUserConfig(mc, name, alias, f)
+	return nil
+}
 
 func validUser(n string) error {
 	if !userNameRe.MatchString(n) {
@@ -195,8 +320,9 @@ func UserAdd(mc MultiConfig, name string, keyFiles []string, alias string) error
 	}
 	f := parseFacts(out)
 	fmt.Fprintf(os.Stderr, "rcc: user %s is ready (container rcc-%s, %s authorized key(s))\n", name, name, f["keys"])
-	if f["keys"] == "0" {
-		fmt.Fprintf(os.Stderr, "rcc: no key yet: add one with  %s user add %s %s --key their_key.pub\n", Prog, mc.Destination, name)
+	if len(keys) == 0 {
+		// No key given: hand out an invite instead.
+		return userInvite(s, mc, name, alias, 7*24*time.Hour)
 	}
 	printUserConfig(mc, name, alias, f)
 	return nil
@@ -221,9 +347,9 @@ func UserConfig(mc MultiConfig, name, alias string) error {
 }
 
 func printUserConfig(mc MultiConfig, name, alias string, f map[string]string) {
-	host := resolveHostname(mc.SSH, mc.SSHArgs, mc.Destination)
+	host := mc.publicHost()
 	if alias == "" {
-		alias = "cc"
+		alias = defaultAlias(host)
 	}
 	port, _ := strconv.Atoi(f["port"])
 	if port == 0 {

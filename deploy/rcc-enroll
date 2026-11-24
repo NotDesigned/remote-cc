@@ -1,0 +1,19 @@
+#!/bin/sh
+# Forced command of a one-time invite key (see `remote-cc user invite`):
+# reads one public key on stdin, authorizes it for this user, and deletes
+# the invite key so the invite cannot be used again.
+set -eu
+id=${1:?invite id}
+f=/etc/remote-cc/userkeys/authorized_keys
+case "$id" in *[!A-Za-z0-9]*) echo "rcc-enroll: bad invite id" >&2; exit 2 ;; esac
+grep -q " rcc-invite-$id\$" "$f" || { echo "rcc-enroll: this invite was already used or revoked" >&2; exit 3; }
+IFS= read -r key || true
+# Plain "type base64 [comment]" only: no key options can be smuggled in.
+printf '%s\n' "$key" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9._@:+-]{1,80})?$' \
+  || { echo "rcc-enroll: not a valid public key" >&2; exit 4; }
+tmp=$(mktemp "$f.XXXXXX")
+grep -v " rcc-invite-$id\$" "$f" > "$tmp" || true
+grep -qxF "$key" "$tmp" || printf '%s\n' "$key" >> "$tmp"
+chmod 644 "$tmp"
+mv -f "$tmp" "$f"
+echo "enrolled"

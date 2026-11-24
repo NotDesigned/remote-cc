@@ -81,7 +81,7 @@ Host cc
 
 **换服务器**：在新服务器上执行一次 `remote-cc setup-server`。如果要带走历史和登录，把旧服务器上的 `/var/lib/remote-cc` 复制到新服务器的同一位置，再执行 `setup-server`。
 
-## 多用户模式（开发中）
+## 多用户模式
 
 适合多个人共用一台服务器的情况：**每人一个容器，整台服务器只开一个端口**。
 
@@ -89,25 +89,54 @@ Host cc
 用户 ──ssh──► 网关（唯一对外端口） ──只放行用户自己的容器──► rcc-<用户>
 ```
 
+**管理员**（在自己的电脑上执行）：
+
 ```sh
-remote-cc server init root@服务器                       # 安装网关（默认端口 2222）
-remote-cc user add --key alice.pub root@服务器 alice     # 建 alice 的容器，授权她的公钥，打印她要用的 ssh 配置
-remote-cc user list root@服务器
-remote-cc user config root@服务器 alice                  # 再次打印 alice 的 ssh 配置和主机指纹
-remote-cc user remove [--purge] root@服务器 alice        # 立即撤销访问；--purge 连数据一起删除
+remote-cc server init root@服务器                  # 安装网关（默认端口 2222）
+remote-cc user add root@服务器 alice               # 建 alice 的容器，输出一条一次性邀请码，私下发给她
+remote-cc user invite root@服务器 alice            # 再生成一条邀请码（换电脑或加设备时用；默认 7 天有效，--ttl 可改）
+remote-cc user list root@服务器                    # 每个用户的容器状态、公钥数、活跃会话、数据大小
+remote-cc user remove [--purge] root@服务器 alice  # 立即撤销访问；--purge 连数据一起删除
+remote-cc update-server root@服务器                # 更新网关和所有用户容器；有人正在用时会拒绝，除非 --force
+remote-cc server migrate --user 名字 root@服务器   # 把现有的单用户部署转成多用户，原来的主人成为这个用户
 ```
 
-- **隔离**：每个用户有自己的容器，也就有自己的 root、Claude 登录和对话历史。网关是一个标准的 OpenSSH，每个用户对应一个没有 shell 的账号，`PermitOpen` 只放行 `rcc-<用户>:22`，其他转发、TTY、命令执行一律拒绝。
-  网关不需要额外权限，也不挂载任何用户数据。
-- **公钥**：每个用户的公钥只存一份，在宿主机的 `<data>/keys/<用户>/authorized_keys`。网关用它认证，用户容器以只读方式挂载它，用于端到端认证。所以即使有人绕过了网关的路由，别人的容器也不接受他的密钥。
+**用户**（在自己的电脑上执行）：
+
+```sh
+remote-cc join <邀请码>    # 生成自己的密钥、登记、写好 ssh 配置、固定主机指纹
+remote-cc login 服务器-cc  # 登录自己的 Claude 账号
+remote-cc 服务器-cc        # 开始使用
+```
+
+`join` 做的事：
+- 在 `~/.ssh/remote-cc/` 下生成本机专用的密钥，写入两个 Host：`<别名>`（用户的容器）和 `<别名>-gw`（网关）。
+- 在 `~/.ssh/config` 开头加一行 `Include remote-cc/config`。
+- 把邀请码里带的两个主机指纹写进 `known_hosts`，所以不需要"第一次连接时信任"。
+- 默认别名是 `<主机名第一段>-cc`，避免覆盖你已有的、指向宿主机的同名别名。可以用 `--alias` 指定。
+
+如果管理员是在服务器本机通过 localhost 执行这些命令的，要加 `--public-host 地址`，指定用户实际连接时用的地址。
+
+### 安全设计
+
+- **隔离**：每个用户有自己的容器，也就有自己的 root、Claude 登录和对话历史。
+  网关是一个标准的 OpenSSH：每个用户对应一个没有 shell 的账号，`PermitOpen` 只放行 `rcc-<用户>:22`；不能执行命令、不能分配 TTY，也不能做其他转发。网关不需要额外权限，也不挂载任何用户数据。
+- **公钥**：每个用户的公钥存在宿主机的 `<data>/keys/<用户>/authorized_keys`。网关用它认证；用户容器挂载自己那一份，用于端到端认证。所以即使有人绕过了网关的路由，别人的容器也不接受他的密钥。
+  用户可以修改自己的公钥文件，但 authorized_keys 里的选项只能进一步收紧限制，不能放宽网关的 `PermitOpen`。
+- **邀请码**：内含一把一次性密钥，分成两半写在两个地方：
+  - 网关这一半在 `<用户>.invites` 里，用户容器看不到这个文件。它只允许跳转到 `rcc-<用户>:22`。
+  - 容器这一半只能执行 `rcc-enroll`，没有任何转发权限。
+  - 两半都带 `expiry-time`，到期自动失效。
+  `rcc-enroll` 只接受一行不带任何选项的公钥；登记成功后删除这把一次性密钥，所以邀请码只能用一次。
+  拿到邀请码的人，在登记之前也只能做"登记一把公钥"这一件事。
 - **已实测**：
-  - 两个用户各自只能进入自己的容器。
-  - 跳转到别人的容器或宿主机，被拒绝（administratively prohibited）。
-  - 用自己的密钥登录别人的容器，被拒绝（Permission denied）。
-  - 在网关上不能执行命令，也不能分配 TTY，不能冒充别的账号或 root，反向转发也被拒绝。
-  - 通过网关能跑完整的 rcc 会话。
-  - 删除用户后，他立即无法连接，其他用户不受影响；`--purge` 会删除数据。
-- **待完成**：邀请码和 `join`（用户不用手动交公钥、写配置），以及把单用户部署迁移到多用户模式。
+  - 用户只能进入自己的容器；跳转到别人的容器或宿主机被拒绝；别人的密钥被容器拒绝。
+  - 在网关上执行命令、分配 TTY、冒充别的账号或 root、反向转发，都被拒绝。
+  - 没用过的一次性密钥：不能拿 shell 或 TTY，不能在容器里建立 `-R`/`-L` 转发，不能跳到别人的容器，不能注入带选项的公钥。这些滥用尝试都不会消耗掉邀请码。
+  - 邀请码只能用一次；过期后无效。
+  - `join` 写出的配置能直接跑完整的 rcc 会话。
+  - 迁移：有活跃会话时拒绝；中途失败自动回滚，数据完好；迁移成功后，原来的对话历史和登录都在，旧的 `known_hosts` 记录依然匹配网关。
+  - `update-server`、`remove-server` 在多用户模式下正常工作。
 
 ## 手动部署
 

@@ -7,7 +7,10 @@ HostKey /etc/ssh/keys/ssh_host_rsa_key
 
 PermitRootLogin no
 PubkeyAuthentication yes
-AuthorizedKeysFile /etc/remote-cc/keys/%u/authorized_keys
+# <user>.invites holds the gateway half of one-time invite keys (forwarding to
+# the user's container only). It sits outside the directory the user's
+# container mounts, so that half never applies inside the container.
+AuthorizedKeysFile /etc/remote-cc/keys/%u.invites /etc/remote-cc/keys/%u/authorized_keys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthenticationMethods publickey

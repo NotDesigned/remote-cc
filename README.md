@@ -64,6 +64,14 @@ remote-cc setup-server --install-docker ubuntu@服务器 # 全新的机器，顺
 
 B 端不需要单独安装别的东西：remote-cc 每次连接时都会自动上传匹配架构的 `rcc-shim`。也可以不用 Docker，直接在 B 上安装 `claude` 和 `sshfs`。
 
+**多人共用一台服务器**：每人一个容器，整台服务器只开一个端口，用一次性邀请码加人。详见 [deploy/README.md](deploy/README.md#多用户模式)。
+
+```sh
+remote-cc server init root@服务器        # 管理员：安装网关
+remote-cc user add root@服务器 alice     # 管理员：建用户，得到一条一次性邀请码
+remote-cc join <邀请码>                  # 用户：一条命令完成密钥、ssh 配置、主机指纹
+```
+
 ## 快速上手
 
 ```sh

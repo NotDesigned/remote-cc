@@ -28,6 +28,7 @@ COPY sshd_config /etc/ssh/sshd_config.d/remote-cc.conf
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY sshd_gateway_config /etc/ssh/sshd_gateway_config
 COPY --chmod=755 rcc-gateway-sync /usr/local/bin/rcc-gateway-sync
+COPY --chmod=755 rcc-enroll /usr/local/bin/rcc-enroll
 # Accounts the gateway creates for users start here (rcc-gateway-sync removes only these).
 RUN sed -i 's/^#\?UID_MIN.*/UID_MIN 2000/' /etc/login.defs
 

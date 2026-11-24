@@ -68,6 +68,7 @@ docker compose version >/dev/null 2>&1 || { echo "rcc: the docker compose plugin
 [ -e /dev/fuse ] || modprobe fuse 2>/dev/null || true
 [ -e /dev/fuse ] || { echo "rcc: /dev/fuse is missing on this host (the fuse kernel module is required)" >&2; exit 3; }
 
+[ -f "$DIR/multi-user" ] && { echo "rcc: $DIR is a multi-user server; manage it with 'user add' / 'update-server'" >&2; exit 3; }
 umask 077
 mkdir -p "$DIR" "$DATA/root/.ssh" "$DATA/ssh"
 printf '%s' "$COMPOSE_B64" | base64 -d > "$DIR/compose.yml"
@@ -195,6 +196,18 @@ func Setup(sc SetupConfig) error {
 const removeScript = sudoPrelude + `
 [ -f "$DIR/compose.yml" ] || { echo "rcc: no remote-cc deployment in $DIR" >&2; exit 3; }
 cd "$DIR"
+if [ -f multi-user ]; then
+  data=$(sed -n 's/^RCC_DATA=//p' .env); port=$(sed -n 's/^RCC_PORT=//p' .env)
+  echo "port=${port:-2222}"
+  for d in users/*/; do [ -d "$d" ] && (cd "$d" && docker compose down --remove-orphans >&2); done
+  docker compose down --rmi all --remove-orphans >&2 || docker compose down --remove-orphans >&2
+  docker network rm remote-cc >/dev/null 2>&1 || true
+  cd / && rm -rf "$DIR"
+  echo "rcc: removed the gateway, all user containers and $DIR" >&2
+  if [ "$PURGE" = 1 ] && [ -n "$data" ] && [ "$data" != / ]; then rm -rf "$data"; echo "rcc: deleted $data (all users' logins and history)" >&2
+  else echo "rcc: kept $data (all users' data)" >&2; fi
+  exit 0
+fi
 data=$(sed -n 's/^RCC_DATA=//p' .env 2>/dev/null); port=$(sed -n 's/^RCC_PORT=//p' .env 2>/dev/null)
 echo "port=${port:-2222}"
 docker compose down --rmi all --remove-orphans >&2 || docker compose down --remove-orphans >&2
@@ -212,6 +225,39 @@ fi
 const updateScript = sudoPrelude + `
 [ -f "$DIR/compose.yml" ] && [ -f "$DIR/.env" ] || { echo "rcc: no remote-cc deployment in $DIR (use setup-server)" >&2; exit 3; }
 cd "$DIR"
+if [ -f multi-user ]; then
+  # Multi-user server: gateway + one container per user, all on one image.
+  if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
+  image=$(sed -n 's/^RCC_IMAGE=//p' .env); data=$(sed -n 's/^RCC_DATA=//p' .env)
+  users=$(grep -v '^$' "$data/gateway/etc/users" 2>/dev/null || true)
+  first=$(printf '%s\n' "$users" | head -1)
+  echo "before=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
+  docker pull -q "$image" >&2 2>/dev/null || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
+  latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
+  gw_new=$(printf '%s' "$COMPOSE_GW_B64" | base64 -d); user_new=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
+  changed=""
+  [ "$(docker inspect -f '{{.Image}}' remote-cc-gateway 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ] || changed="gateway"
+  for n in $users; do
+    [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] && [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] || changed="$changed $n"
+  done
+  [ -n "$changed" ] || { echo "uptodate=1"; exit 0; }
+  busy=""
+  for n in $users; do
+    a=$(docker exec "rcc-$n" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); done; echo $n' 2>/dev/null || echo 0)
+    [ "${a:-0}" -gt 0 ] && busy="$busy $n($a)"
+  done
+  if [ -n "$busy" ] && [ "$FORCE" != 1 ]; then
+    echo "rcc: active sessions would be disconnected:$busy; retry when they end, or pass --force" >&2; exit 5
+  fi
+  ids() { for c in remote-cc-gateway $(for n in $users; do echo "rcc-$n"; done); do docker inspect -f '{{.Id}}' "$c" 2>/dev/null; done; }
+  ids0=$(ids)
+  printf '%s\n' "$gw_new" > compose.yml && docker compose up -d >&2
+  for n in $users; do printf '%s\n' "$user_new" > "users/$n/compose.yml"; (cd "users/$n" && docker compose up -d >&2); done
+  docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/NotDesigned/remote-cc" >/dev/null 2>&1 || true
+  echo "after=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
+  [ "$ids0" != "$(ids)" ] && echo "recreated=1"
+  exit 0
+fi
 name=$(sed -n 's/^RCC_NAME=//p' .env); name=${name:-remote-cc}
 grep -q '^RCC_NAME=' .env || echo "RCC_NAME=$name" >> .env
 if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
@@ -266,7 +312,8 @@ func UpdateServer(cfg Config, installDir, image string, force bool) error {
 	defer cleanup()
 	fmt.Fprintf(os.Stderr, "rcc: updating remote-cc server on %s …\n", cfg.Destination)
 	out, err := s.runElevated(vars("DIR", installDir, "IMAGE", image, "FORCE", boolStr(force),
-		"COMPOSE_B64", base64Std(deploy.Compose)), updateScript)
+		"COMPOSE_B64", base64Std(deploy.Compose), "COMPOSE_GW_B64", base64Std(deploy.ComposeGateway),
+		"COMPOSE_USER_B64", base64Std(deploy.ComposeUser)), updateScript)
 	if err != nil {
 		return fmt.Errorf("update failed: %w", err)
 	}
