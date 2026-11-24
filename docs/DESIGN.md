@@ -264,6 +264,8 @@ B 上直接运行的 claude 看到的还是原来的目录。`--profile none` �
   - Windows 上把参数里 B 形式的路径（`/c/x`、`--opt=/c/x`）换成 `C:/x`，git 输出里的 `C:/x` 换回 `/c/x`（按行处理，`-z` 的 NUL 也算行尾）。不用 Git Bash 的自动参数转换，因为 Claude 会传 `core.hooksPath=/dev/null` 这类值，自动转换的结果不可预测。
   - 本地实测（真实 Claude Code 2.1.325 加一个假的 Messages API）：`-w wt1` 时 Claude 发出约 20 次 git 调用，全部到了 A；worktree 建在 A 的 `<项目>/.claude/worktrees/wt1`，分支 `worktree-wt1`，Bash 命令在 worktree 里执行。
 - **CI 里跑真实的 Claude Code**：`test/mockapi.py` 是一个假的 Anthropic Messages API（支持流式），让 Claude 依次调用几次 Bash 工具，并记录结果。集成测试在用户容器里用它跑真实的 claude：检查命令在 runner 上执行、cwd 在调用之间保持、`--worktree` 建在 runner 上、Claude 的 git 调用走了本机。这样不需要 Claude 账号就能覆盖真实的命令格式。
+- **sshfs 缓存**：CI 里发现，git 在 A 上建好 worktree 后，Claude 在 B 上立刻 `realpath` 却得到 ENOENT。原因是 sshfs 自己的目录缓存（默认 20 秒），加上挂载时设置的 `negative_timeout=1`（"不存在"也被缓存）：Claude 先前查过这个路径，缓存里记着"不存在"。
+  同样的问题也会出现在 Bash 命令修改过的文件上。现在挂载参数改为 `dir_cache=no,negative_timeout=0`，只保留内核 1 秒的正向缓存（Claude 两次工具调用之间通常远超 1 秒）。代价是大目录的 Glob/Grep 会多一些往返。
 - **启动前检查 shell**：有用户报告 Windows 上每条命令都是 exit code 1 且没有输出。现在 rcc 启动 Claude 前先在本机 shell 里执行一次 `echo`，失败就停止并显示 shell 路径和输出；`last.log` 记录使用的 shell。Windows 上优先使用 Git for Windows 的标准安装位置，PATH 里的 git 只有旁边有 `cmd\git.exe`（确认是 Git for Windows）时才采用。
 
 ## 实现选型

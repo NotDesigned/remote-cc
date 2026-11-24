@@ -5,7 +5,10 @@
 # projects/ and history.jsonl (CFG), keeping machines' histories apart.
 : "${R:?}" "${RUN:?}" "${PROF?}" "${CFG:?}"
 set -e
-opts="slave,uid=$(id -u),gid=$(id -g),attr_timeout=1,entry_timeout=1,negative_timeout=1"
+# Files also change on A (Claude's commands and git run there), so sshfs'
+# own directory cache (20s by default) and remembered "not found" answers
+# would show stale state: off. The kernel keeps 1s of positive caching.
+opts="slave,uid=$(id -u),gid=$(id -g),dir_cache=no,attr_timeout=1,entry_timeout=1,negative_timeout=0"
 first="$R"
 while [ ! -e "$(dirname "$first")" ]; do first=$(dirname "$first"); done
 [ -e "$R" ] || printf '%s\n' "$first" > "$RUN/created"
