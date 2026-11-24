@@ -44,6 +44,9 @@ type Start struct {
 	// CaptureCwd asks the agent to set $RCC_CWD_FILE to a temp file and
 	// return its trimmed contents in Exit.Cwd.
 	CaptureCwd bool `json:"captureCwd,omitempty"`
+	// Argv, when set, runs that program directly instead of Cmd. Only
+	// ["git", …]: Claude Code's own git calls on the project (see shim.Git).
+	Argv []string `json:"argv,omitempty"`
 }
 
 // Signal names are portable ("INT", "TERM", "HUP", "KILL").

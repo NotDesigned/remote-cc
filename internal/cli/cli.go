@@ -28,6 +28,8 @@ const usageText = `usage:
       --account NAME         Claude login: default this machine's own; "default" = shared
       --profile NAME         history: default this machine's own; "none" = the account's
       --claude PATH  --no-prompt  --no-is-sandbox
+      --remote-git           Claude Code's own git calls (status, --worktree, …) run
+                             on the server instead of here
       ssh options: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER -4 -6 -A -C -q
 
 on your machine:
@@ -64,8 +66,11 @@ func Main(args []string, version string) int {
 		return 0
 	}
 	prog := strings.TrimSuffix(filepath.Base(args[0]), ".exe")
-	if prog == "rcc-shim" {
+	switch prog {
+	case "rcc-shim":
 		return runShim(args[1:])
+	case "git": // a dev build uploaded as the shim, called through bin/git
+		return shim.Git(args[1:])
 	}
 	remote.Prog = prog
 	if len(args) < 2 {
@@ -195,7 +200,7 @@ func runSession(args []string) int {
 	var c client.Config
 	t, pos, after, err := parse(args, flags{
 		str:   map[string]*string{"--claude": &c.ClaudePath, "--profile": &c.Profile, "--account": &c.Account},
-		bools: map[string]*bool{"--no-prompt": &c.NoPrompt, "--no-is-sandbox": &c.NoIsSandbox},
+		bools: map[string]*bool{"--no-prompt": &c.NoPrompt, "--no-is-sandbox": &c.NoIsSandbox, "--remote-git": &c.RemoteGit},
 	})
 	if err != nil || len(pos) < 1 || len(pos) > 2 {
 		if err != nil {

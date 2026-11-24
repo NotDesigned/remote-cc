@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-server sshfs fuse3 procps ca-certificates sudo \
+ && apt-get install -y --no-install-recommends openssh-server sshfs fuse3 procps ca-certificates sudo git \
  && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man \
  && mkdir -p /run/sshd /etc/ssh/keys \
  && rm -f /etc/ssh/ssh_host_*

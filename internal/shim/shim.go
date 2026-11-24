@@ -24,27 +24,40 @@ const (
 
 // Run executes cmdStr on A and returns the exit code to use.
 func Run(cmdStr string) int {
-	addr := os.Getenv(EnvSock)
-	if addr == "" {
-		return fail("%s is not set; start Claude Code through rcc", EnvSock)
+	c, done, code := connect()
+	if c == nil {
+		return code
 	}
-	nc, err := dial(addr)
-	if err != nil {
-		return fail("cannot reach rcc on the local machine (%s): %v", addr, err)
-	}
-	defer nc.Close()
-	c := proto.NewConn(nc)
+	defer done()
 
 	rw := Rewrite(cmdStr)
 	cwd, _ := os.Getwd()
-	st := proto.Start{
+	return exchange(c, proto.Start{
 		Version:    proto.Version,
 		Token:      os.Getenv(EnvToken),
 		Cmd:        rw.Cmd,
 		Cwd:        cwd,
 		Env:        forwardEnv(os.Environ(), rw.Cmd),
 		CaptureCwd: rw.CwdFile != "",
+	}, rw.CwdFile)
+}
+
+// connect opens the command channel to the agent on A.
+func connect() (*proto.Conn, func(), int) {
+	addr := os.Getenv(EnvSock)
+	if addr == "" {
+		return nil, nil, fail("%s is not set; start Claude Code through rcc", EnvSock)
 	}
+	nc, err := dial(addr)
+	if err != nil {
+		return nil, nil, fail("cannot reach rcc on the local machine (%s): %v", addr, err)
+	}
+	return proto.NewConn(nc), func() { nc.Close() }, 0
+}
+
+// exchange sends st, relays stdin, signals and output, and returns the exit
+// code. cwdFile, if set, receives the command's final directory.
+func exchange(c *proto.Conn, st proto.Start, cwdFile string) int {
 	if err := c.WriteJSON(proto.TStart, st); err != nil {
 		return fail("send: %v", err)
 	}
@@ -79,9 +92,9 @@ func Run(cmdStr string) int {
 			if err := json.Unmarshal(f.Payload, &ex); err != nil {
 				return fail("bad exit frame: %v", err)
 			}
-			if rw.CwdFile != "" && ex.Cwd != "" {
+			if cwdFile != "" && ex.Cwd != "" {
 				// Same semantics as `pwd -P >| FILE`.
-				os.WriteFile(rw.CwdFile, []byte(ex.Cwd+"\n"), 0o600)
+				os.WriteFile(cwdFile, []byte(ex.Cwd+"\n"), 0o600)
 			}
 			return ex.Code
 		}
