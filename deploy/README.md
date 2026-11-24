@@ -81,6 +81,34 @@ Host cc
 
 **换服务器**：在新服务器上执行一次 `remote-cc setup-server`。如果要带走历史和登录，把旧服务器上的 `/var/lib/remote-cc` 复制到新服务器的同一位置，再执行 `setup-server`。
 
+## 多用户模式（开发中）
+
+适合多个人共用一台服务器的情况：**每人一个容器，整台服务器只开一个端口**。
+
+```
+用户 ──ssh──► 网关（唯一对外端口） ──只放行用户自己的容器──► rcc-<用户>
+```
+
+```sh
+remote-cc server init root@服务器                       # 安装网关（默认端口 2222）
+remote-cc user add --key alice.pub root@服务器 alice     # 建 alice 的容器，授权她的公钥，打印她要用的 ssh 配置
+remote-cc user list root@服务器
+remote-cc user config root@服务器 alice                  # 再次打印 alice 的 ssh 配置和主机指纹
+remote-cc user remove [--purge] root@服务器 alice        # 立即撤销访问；--purge 连数据一起删除
+```
+
+- **隔离**：每个用户有自己的容器，也就有自己的 root、Claude 登录和对话历史。网关是一个标准的 OpenSSH，每个用户对应一个没有 shell 的账号，`PermitOpen` 只放行 `rcc-<用户>:22`，其他转发、TTY、命令执行一律拒绝。
+  网关不需要额外权限，也不挂载任何用户数据。
+- **公钥**：每个用户的公钥只存一份，在宿主机的 `<data>/keys/<用户>/authorized_keys`。网关用它认证，用户容器以只读方式挂载它，用于端到端认证。所以即使有人绕过了网关的路由，别人的容器也不接受他的密钥。
+- **已实测**：
+  - 两个用户各自只能进入自己的容器。
+  - 跳转到别人的容器或宿主机，被拒绝（administratively prohibited）。
+  - 用自己的密钥登录别人的容器，被拒绝（Permission denied）。
+  - 在网关上不能执行命令，也不能分配 TTY，不能冒充别的账号或 root，反向转发也被拒绝。
+  - 通过网关能跑完整的 rcc 会话。
+  - 删除用户后，他立即无法连接，其他用户不受影响；`--purge` 会删除数据。
+- **待完成**：邀请码和 `join`（用户不用手动交公钥、写配置），以及把单用户部署迁移到多用户模式。
+
 ## 手动部署
 
 ```sh

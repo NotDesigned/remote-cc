@@ -4,6 +4,9 @@ HostKey /etc/ssh/keys/ssh_host_ecdsa_key
 HostKey /etc/ssh/keys/ssh_host_rsa_key
 
 PermitRootLogin prohibit-password
+# In multi-user mode the user's keys are managed on the host (shared with the
+# gateway) and mounted read-only here; in single mode that file is absent.
+AuthorizedKeysFile .ssh/authorized_keys /etc/remote-cc/userkeys/authorized_keys
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no

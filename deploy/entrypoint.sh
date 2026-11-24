@@ -2,6 +2,17 @@
 # Prepare persistent state, then run sshd in the foreground.
 set -e
 
+if [ "${RCC_ROLE:-}" = gateway ]; then
+  for t in ed25519 ecdsa rsa; do
+    k=/etc/ssh/keys/ssh_host_${t}_key
+    [ -f "$k" ] || ssh-keygen -q -t "$t" -N '' -f "$k"
+  done
+  chmod 600 /etc/ssh/keys/*_key
+  mkdir -p /etc/remote-cc/gateway /etc/remote-cc/keys
+  rcc-gateway-sync
+  exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_gateway_config -o PidFile=/run/sshd-gateway.pid
+fi
+
 # Host keys live in a volume so the fingerprint survives image rebuilds.
 for t in ed25519 ecdsa rsa; do
   k=/etc/ssh/keys/ssh_host_${t}_key

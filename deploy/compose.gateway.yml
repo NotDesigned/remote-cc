@@ -1,0 +1,22 @@
+# remote-cc multi-user gateway: the only public port of the server.
+services:
+  gateway:
+    image: ${RCC_IMAGE:-ghcr.io/notdesigned/remote-cc-server:latest}
+    container_name: remote-cc-gateway
+    hostname: remote-cc-gateway
+    restart: unless-stopped
+    init: true
+    environment:
+      RCC_ROLE: gateway
+    ports:
+      - "${RCC_PUBLISH:-2222:22}"
+    volumes:
+      - ${RCC_DATA:-/var/lib/remote-cc}/gateway/ssh:/etc/ssh/keys
+      - ${RCC_DATA:-/var/lib/remote-cc}/gateway/etc:/etc/remote-cc/gateway
+      - ${RCC_DATA:-/var/lib/remote-cc}/keys:/etc/remote-cc/keys:ro
+    networks:
+      - remote-cc
+networks:
+  remote-cc:
+    name: remote-cc
+    external: true

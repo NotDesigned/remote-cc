@@ -59,6 +59,10 @@ func main() {
 		os.Exit(runRemoveServer(os.Args[2:]))
 	case "update-server":
 		os.Exit(runUpdateServer(os.Args[2:]))
+	case "server":
+		os.Exit(runServerCmd(os.Args[2:]))
+	case "user":
+		os.Exit(runUserCmd(os.Args[2:]))
 	case "update":
 		os.Exit(runUpdate(os.Args[2:]))
 	case "login", "logout", "status", "setup-token", "token", "accounts":
@@ -139,6 +143,13 @@ server (Docker):
                    pull the latest server image (new Claude Code) and recreate
                    the container if anything changed; data and keys are kept;
                    refuses while sessions are running unless --force
+
+multi-user servers (one gateway port, one container per user):
+  rcc server init [--port 2222] [--bind ADDR] [ssh options] user@host
+  rcc user add    [--key FILE.pub]... [--alias NAME] [ssh options] host user
+  rcc user list   [ssh options] host
+  rcc user config [--alias NAME] [ssh options] host user
+  rcc user remove [--purge] [--force] [ssh options] host user
 
 updates:
   rcc update [--check] [--version vX.Y.Z]   replace this rcc with a release
@@ -437,6 +448,128 @@ func runUpdateServer(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// splitMulti pulls the multi-user admin flags out of args.
+func splitMulti(args []string, extra map[string]*[]string, bools map[string]*bool) (session.MultiConfig, []string, bool) {
+	mc := session.MultiConfig{InstallDir: "/opt/remote-cc", DataDir: "/var/lib/remote-cc", Port: 2222,
+		Image: "ghcr.io/notdesigned/remote-cc-server:latest"}
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := func() string {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "rcc: %s needs a value\n", a)
+				os.Exit(2)
+			}
+			i++
+			return args[i]
+		}
+		if p, ok := extra[a]; ok {
+			*p = append(*p, val())
+			continue
+		}
+		if b, ok := bools[a]; ok {
+			*b = true
+			continue
+		}
+		switch a {
+		case "--install-dir":
+			mc.InstallDir = val()
+		case "--data":
+			mc.DataDir = val()
+		case "--port":
+			p, err := strconv.Atoi(val())
+			if err != nil || p < 1 || p > 65535 {
+				fmt.Fprintln(os.Stderr, "rcc: bad --port")
+				os.Exit(2)
+			}
+			mc.Port = p
+		case "--bind":
+			mc.Bind = val()
+		case "--image":
+			mc.Image = val()
+		default:
+			rest = append(rest, a)
+		}
+	}
+	cfg, pos, ok := parseArgs(rest)
+	mc.Config = cfg
+	return mc, pos, ok
+}
+
+func fail(err error) int {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rcc:", err)
+		return 1
+	}
+	return 0
+}
+
+// runServerCmd: rcc server init [--port N] [--bind A] [--data D] [--image I] [ssh options] host
+func runServerCmd(args []string) int {
+	if len(args) == 0 || args[0] != "init" {
+		fmt.Fprintln(os.Stderr, "usage: "+prog()+" server init [--port 2222] [--bind ADDR] [--data /var/lib/remote-cc] [--image IMG] [ssh options] user@host")
+		return 2
+	}
+	mc, pos, ok := splitMulti(args[1:], nil, nil)
+	if !ok || len(pos) != 1 {
+		return runServerCmd(nil)
+	}
+	mc.Destination = pos[0]
+	return fail(session.ServerInit(mc))
+}
+
+// runUserCmd: rcc user add|list|remove|config ...
+func runUserCmd(args []string) int {
+	usage := func() int {
+		p := prog()
+		fmt.Fprintf(os.Stderr, `usage:
+  %[1]s user add    [--key FILE.pub]... [--alias NAME] [ssh options] host user
+  %[1]s user list   [ssh options] host
+  %[1]s user config [--alias NAME] [ssh options] host user
+  %[1]s user remove [--purge] [--force] [ssh options] host user
+`, p)
+		return 2
+	}
+	if len(args) == 0 {
+		return usage()
+	}
+	var keys, alias []string
+	var purge, force bool
+	mc, pos, ok := splitMulti(args[1:], map[string]*[]string{"--key": &keys, "--alias": &alias},
+		map[string]*bool{"--purge": &purge, "--force": &force})
+	if !ok {
+		return usage()
+	}
+	last := func(v []string) string {
+		if len(v) == 0 {
+			return ""
+		}
+		return v[len(v)-1]
+	}
+	switch args[0] {
+	case "list":
+		if len(pos) != 1 {
+			return usage()
+		}
+		mc.Destination = pos[0]
+		return fail(session.UserList(mc))
+	case "add", "config", "remove":
+		if len(pos) != 2 {
+			return usage()
+		}
+		mc.Destination = pos[0]
+		switch args[0] {
+		case "add":
+			return fail(session.UserAdd(mc, pos[1], keys, last(alias)))
+		case "config":
+			return fail(session.UserConfig(mc, pos[1], last(alias)))
+		default:
+			return fail(session.UserRemove(mc, pos[1], purge, force))
+		}
+	}
+	return usage()
 }
 
 func runShim(args []string) int {

@@ -6,3 +6,9 @@ import _ "embed"
 
 //go:embed compose.yml
 var Compose string
+
+//go:embed compose.gateway.yml
+var ComposeGateway string
+
+//go:embed compose.user.yml
+var ComposeUser string

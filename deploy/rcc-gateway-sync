@@ -1,0 +1,24 @@
+#!/bin/sh
+# Make the gateway's Linux users and per-user forwarding rules match
+# /etc/remote-cc/gateway/users (one name per line), then reload sshd.
+set -e
+list=/etc/remote-cc/gateway/users
+conf=/etc/ssh/sshd_gateway_users.conf
+touch "$list"
+tmp=$(mktemp)
+while IFS= read -r u; do
+  case "$u" in ''|\#*) continue ;; esac
+  printf '%s' "$u" | grep -Eq '^[a-z][a-z0-9-]{0,30}$' || { echo "rcc-gateway-sync: skipping invalid user name '$u'" >&2; continue; }
+  if ! id "$u" >/dev/null 2>&1; then
+    useradd --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$u"
+    usermod -p '*' "$u"          # no password, but not "locked" (sshd refuses locked accounts)
+  fi
+  printf 'Match User %s\n    PermitOpen rcc-%s:22\n' "$u" "$u" >> "$tmp"
+done < "$list"
+# Remove accounts of users no longer listed (only those we created: uid >= 2000).
+getent passwd | awk -F: '$3 >= 2000 && $3 < 60000 {print $1}' | while IFS= read -r u; do
+  grep -qx "$u" "$list" || userdel "$u" 2>/dev/null || true
+done
+mv "$tmp" "$conf"; chmod 644 "$conf"
+sshd -t -f /etc/ssh/sshd_gateway_config
+if [ -f /run/sshd-gateway.pid ]; then kill -HUP "$(cat /run/sshd-gateway.pid)"; fi

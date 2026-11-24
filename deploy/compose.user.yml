@@ -1,0 +1,25 @@
+# One user's container in multi-user mode: no published port, reachable only
+# through the gateway on the "remote-cc" network.
+services:
+  remote-cc:
+    image: ${RCC_IMAGE:-ghcr.io/notdesigned/remote-cc-server:latest}
+    container_name: ${RCC_NAME}
+    hostname: ${RCC_NAME}
+    restart: unless-stopped
+    init: true
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - ${RCC_DATA}/root:/root
+      - ${RCC_DATA}/ssh:/etc/ssh/keys
+      - ${RCC_KEYS}:/etc/remote-cc/userkeys:ro
+    networks:
+      - remote-cc
+networks:
+  remote-cc:
+    name: remote-cc
+    external: true
