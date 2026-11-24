@@ -110,7 +110,7 @@ remote-cc -v cc                      # 显示过程；-vv / -vvv / -vvvv 同时�
 
 对话历史保存在 B 上，按本机隔离：两台机器即使项目路径相同，也不会看到对方的对话。
 
-A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Windows 是 `%LOCALAPPDATA%\rcc\last.log`，macOS 是 `~/Library/Caches/rcc/last.log`。
+A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Windows 是 `%LOCALAPPDATA%\rcc\last.log`，macOS 是 `~/Library/Caches/rcc/last.log`；上一次会话的日志在同一目录的 `prev.log`。
 
 ### 账号
 

@@ -331,7 +331,11 @@ func (s *session) openLog() *os.File {
 	if dir, err := os.UserCacheDir(); err == nil {
 		dir = filepath.Join(dir, "rcc")
 		if os.MkdirAll(dir, 0o700) == nil {
-			if f, err := os.Create(filepath.Join(dir, "last.log")); err == nil {
+			// Keep the previous session's log too: problems are often
+			// reported after another session has started.
+			last := filepath.Join(dir, "last.log")
+			os.Rename(last, filepath.Join(dir, "prev.log"))
+			if f, err := os.Create(last); err == nil {
 				s.conn.Logf("log file: %s", f.Name())
 				return f
 			}
