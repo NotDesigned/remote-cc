@@ -10,17 +10,6 @@ image=$(sed -n 's/^RCC_IMAGE=//p' .env)
 grep -q '^COMPOSE_PROJECT_NAME=' .env || echo "COMPOSE_PROJECT_NAME=$NET" >> .env
 users=$(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true)
 first=$(printf '%s\n' "$users" | head -1)
-echo "before=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
-docker pull -q "$image" >/dev/null 2>&1 || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
-latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
-gw_new=$(printf '%s' "$COMPOSE_GW_B64" | base64 -d); user_new=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
-project() { docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null; }
-changed=""
-{ [ "$(docker inspect -f '{{.Image}}' "$GW" 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ]; } || changed="gateway"
-for n in $users; do
-  { [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] &&
-    [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] && [ "$(project "rcc-$n")" = "rcc-$n" ]; } || changed="$changed $n"
-done
 # Containers that exist but were stopped (docker stop, or they crashed past
 # their restart policy) are started first: that needs no recreate.
 started=""
@@ -33,6 +22,17 @@ if [ -n "$started" ]; then
   wait_up $started || exit 4
   echo "started=${started# }"
 fi
+echo "before=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
+docker pull -q "$image" >/dev/null 2>&1 || echo "rcc: warning: could not pull $image; comparing with the local image" >&2
+latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
+gw_new=$(printf '%s' "$COMPOSE_GW_B64" | base64 -d); user_new=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
+project() { docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null; }
+changed=""
+{ [ "$(docker inspect -f '{{.Image}}' "$GW" 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ]; } || changed="gateway"
+for n in $users; do
+  { [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] &&
+    [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] && [ "$(project "rcc-$n")" = "rcc-$n" ]; } || changed="$changed $n"
+done
 [ -n "$changed" ] || { echo "uptodate=1"; exit 0; }
 busy=""
 for n in $users; do
