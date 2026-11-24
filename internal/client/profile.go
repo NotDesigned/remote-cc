@@ -1,9 +1,10 @@
-package session
+package client
 
 import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"remote-cc/internal/remote"
 	"strings"
 )
 
@@ -27,7 +28,7 @@ func MachineProfile() (string, error) {
 			return p, nil
 		}
 	}
-	p := sanitizeHost() + "-" + randHex(4)
+	p := sanitizeHost() + "-" + remote.RandHex(4)
 	if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
 		return "", err
 	}

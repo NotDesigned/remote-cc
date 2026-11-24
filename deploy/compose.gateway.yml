@@ -14,6 +14,10 @@ services:
       - ${RCC_DATA:-/var/lib/remote-cc}/gateway/ssh:/etc/ssh/keys
       - ${RCC_DATA:-/var/lib/remote-cc}/gateway/etc:/etc/remote-cc/gateway
       - ${RCC_DATA:-/var/lib/remote-cc}/keys:/etc/remote-cc/keys:ro
+      # Writable: gateway halves of invites only. Users' keys stay read-only
+      # here, so even a compromised gateway cannot authorize keys in a
+      # user's container.
+      - ${RCC_DATA:-/var/lib/remote-cc}/invites:/etc/remote-cc/invites
     networks:
       - remote-cc
 networks:

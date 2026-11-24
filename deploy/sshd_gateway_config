@@ -7,10 +7,10 @@ HostKey /etc/ssh/keys/ssh_host_rsa_key
 
 PermitRootLogin no
 PubkeyAuthentication yes
-# <user>.invites holds the gateway half of one-time invite keys (forwarding to
-# the user's container only). It sits outside the directory the user's
-# container mounts, so that half never applies inside the container.
-AuthorizedKeysFile /etc/remote-cc/keys/%u.invites /etc/remote-cc/keys/%u/authorized_keys
+# invites/<user> holds the gateway half of one-time invite keys (forwarding to
+# the user's container only); it is not visible inside the user's container.
+# keys/<user>.invites is the same for servers set up by rcc 0.4.x.
+AuthorizedKeysFile /etc/remote-cc/invites/%u /etc/remote-cc/keys/%u.invites /etc/remote-cc/keys/%u/authorized_keys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthenticationMethods publickey
@@ -28,7 +28,8 @@ AllowAgentForwarding no
 PermitTunnel no
 PermitTTY no
 PermitUserEnvironment no
-ForceCommand /bin/echo "remote-cc gateway: this account can only reach its own container (use it as ProxyJump)"
+# Sessions may only run rcc-gateway-cmd (self-service invite, host key).
+ForceCommand /usr/local/bin/rcc-gateway-cmd
 
 ClientAliveInterval 15
 ClientAliveCountMax 4

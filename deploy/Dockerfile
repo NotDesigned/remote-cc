@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-server sshfs fuse3 procps ca-certificates \
+ && apt-get install -y --no-install-recommends openssh-server sshfs fuse3 procps ca-certificates sudo \
  && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man \
  && mkdir -p /run/sshd /etc/ssh/keys \
  && rm -f /etc/ssh/ssh_host_*
@@ -29,6 +29,11 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY sshd_gateway_config /etc/ssh/sshd_gateway_config
 COPY --chmod=755 rcc-gateway-sync /usr/local/bin/rcc-gateway-sync
 COPY --chmod=755 rcc-enroll /usr/local/bin/rcc-enroll
+COPY --chmod=755 rcc-gateway-cmd /usr/local/bin/rcc-gateway-cmd
+COPY --chmod=755 rcc-self-invite /usr/local/bin/rcc-self-invite
+# Gateway accounts may run exactly this one program as root (self-service invites).
+RUN printf 'ALL ALL=(root) NOPASSWD: /usr/local/bin/rcc-self-invite\n' > /etc/sudoers.d/rcc-self-invite \
+ && chmod 440 /etc/sudoers.d/rcc-self-invite && visudo -cf /etc/sudoers.d/rcc-self-invite
 # Accounts the gateway creates for users start here (rcc-gateway-sync removes only these).
 RUN sed -i 's/^#\?UID_MIN.*/UID_MIN 2000/' /etc/login.defs
 
