@@ -24,6 +24,21 @@ jobs:
         run: for os in linux darwin windows; do GOOS=$os go vet ./...; done
       - run: go test ./...
 
+  # The local side on real Windows (Git Bash, job objects) and macOS: the
+  # agent runs Claude-style commands and forwarded git calls.
+  local-side:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -v ./internal/agent ./internal/procjob ./internal/pathmap ./internal/shim ./internal/cli
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
