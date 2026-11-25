@@ -6,6 +6,7 @@ package remote
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -207,9 +208,22 @@ func (c *Conn) ElevatedInput(params, body, input string) ([]byte, error) {
 }
 
 // wrap makes a script runnable by any login shell (bash, zsh, fish, …).
+// Long scripts (server admin scripts carry compose files) are compressed:
+// Windows refuses command lines over 32767 characters.
 func wrap(script string) string {
-	return `sh -c 'eval "$(printf %s ` + Base64(script) + ` | base64 -d)"'`
+	plain := `sh -c 'eval "$(printf %s ` + Base64(script) + ` | base64 -d)"'`
+	if len(plain) <= maxPlainCommand {
+		return plain
+	}
+	var b bytes.Buffer
+	w, _ := gzip.NewWriterLevel(&b, gzip.BestCompression)
+	w.Write([]byte(script))
+	w.Close()
+	return `sh -c 'eval "$(printf %s ` + base64.StdEncoding.EncodeToString(b.Bytes()) + ` | base64 -d | gzip -dc)"'`
 }
+
+// maxPlainCommand is the longest command sent uncompressed.
+const maxPlainCommand = 16 << 10
 
 // Vars renders shell assignments KEY='value' for a script prologue.
 func Vars(kv ...string) string {

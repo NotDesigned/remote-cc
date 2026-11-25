@@ -12,7 +12,7 @@
 
 ### 变更
 
-无
+- 修复：Windows 上 `server update`、`server setup`、`server migrate`、`server egress` 等管理命令报「The filename or extension is too long」。发给服务器的长脚本改为压缩后传送，服务器需要有 `gzip`。
 
 ### 移除
 
