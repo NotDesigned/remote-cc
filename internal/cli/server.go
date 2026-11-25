@@ -117,6 +117,9 @@ var (
 	runUserConfig = admin(func(in *invocation, c server.Config) error {
 		return server.UserConfig(c, in.pos[1], in.s("--alias"))
 	})
+	runUserRebuild = admin(func(in *invocation, c server.Config) error {
+		return server.UserRebuild(c, in.pos[1], in.b("--force"))
+	})
 	runUserRemove = admin(func(in *invocation, c server.Config) error {
 		return server.UserRemove(c, in.pos[1], in.b("--purge"), in.b("--force"))
 	})

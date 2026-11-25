@@ -52,6 +52,7 @@ remote-cc server user add root@<服务器> <用户名>             # 建容器�
 remote-cc server user invite root@<服务器> <用户名>          # 再生成一条邀请码（默认 7 天有效，--ttl 可改）
 remote-cc server user list root@<服务器>                     # 每个服务器用户的容器状态、设备数、活跃会话、数据大小
 remote-cc server user config root@<服务器> <用户名>          # 打印手写 ssh 配置所需的内容
+remote-cc server user rebuild root@<服务器> <用户名>         # 重建这个用户的容器（数据、登录、密钥都保留）；有会话时加 --force
 remote-cc server user remove root@<服务器> <用户名>          # 立即撤销访问，数据保留
 remote-cc server user remove --purge root@<服务器> <用户名>  # 连数据一起删除
 ```

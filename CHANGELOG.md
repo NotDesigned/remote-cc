@@ -8,6 +8,7 @@
 
 ### 新增
 
+- `remote-cc server user rebuild SERVER NAME`：重建一个服务器用户的容器，数据、Claude 登录、密钥和设置都保留；有会话时拒绝，除非 `--force`。
 - 选配置更省事：`--rcb` 和 `rcb use` 接受 `rcb profiles` 里的序号（这个列表多了「#」一列），以及配置 id、名称或 Claude 邮箱中任意一段，只要只有一个配置含有它；`rcb use` 不写配置时列出全部配置让你选；在用 `rcb use` 记过的目录里，`account login` 等账号命令不写 `--rcb` 和服务器也会用这个目录的配置。
 - `remote-cc host list`：列出这台电脑上的容器别名（`HOST`），以及各自的服务器地址和服务器用户；标出当前目录用 `rcb use` 记住的那一个。
 

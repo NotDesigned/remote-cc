@@ -147,6 +147,13 @@ remote-cc server user remove --purge "$ADMIN" alice
 expect_fail as alice ssh -o BatchMode=yes "$alias" true
 expect_fail sudo docker inspect rcc-alice >/dev/null 2>&1
 
+step "server user rebuild: a fresh container, same user"
+before=$(sudo docker inspect -f '{{.Id}}' rcc-owner)
+remote-cc server user rebuild "$ADMIN" owner
+[ "$(sudo docker inspect -f '{{.Id}}' rcc-owner)" != "$before" ] || fail "rcc-owner was not recreated"
+[ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "the rebuilt container is unreachable"
+expect_fail remote-cc server user rebuild "$ADMIN" nobody
+
 step "a stopped container: clear error, server update starts it"
 sudo docker stop rcc-owner >/dev/null
 if out=$(cd "$proj" && remote-cc --claude /usr/local/bin/fake-claude "$alias" 2>&1); then fail "connected to a stopped container"; fi

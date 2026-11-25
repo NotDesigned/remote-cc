@@ -308,6 +308,23 @@ func UserList(c Config) error {
 	return nil
 }
 
+// UserRebuild recreates a user's container (data, keys and settings kept).
+func UserRebuild(c Config, name string, force bool) error {
+	conn, err := c.open()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	fmt.Fprintf(os.Stderr, "rcc: rebuilding rcc-%s on %s …\n", name, c.Dest)
+	f, err := conn.Elevated(remote.Vars("DIR", c.InstallDir, "NAME", name, "FORCE", remote.Bool(force)),
+		scripts.Host("server/user-rebuild.sh"))
+	if err != nil {
+		return fmt.Errorf("server user rebuild failed: %w", err)
+	}
+	fmt.Printf("rebuilt rcc-%s (%s); its data, keys and settings are kept\n", name, f["image"])
+	return nil
+}
+
 // UserRemove revokes a user's access and removes their container.
 func UserRemove(c Config, name string, purge, force bool) error {
 	if err := sshconf.ValidUser(name); err != nil {
