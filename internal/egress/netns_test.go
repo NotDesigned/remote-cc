@@ -59,3 +59,17 @@ func TestFirewallClosesTheUplink(t *testing.T) {
 		}
 	}
 }
+
+// Teardown deletes the host end explicitly: a namespace a session still
+// holds keeps the veth pair alive past "netns del".
+func TestTeardownDeletesHostLink(t *testing.T) {
+	l := LayoutFor("proxy-a", 0)
+	var cmds []string
+	for _, c := range teardownCommands(l) {
+		cmds = append(cmds, strings.Join(c, " "))
+	}
+	all := strings.Join(cmds, "\n")
+	if !strings.Contains(all, "ip link del "+l.HostIf) || !strings.Contains(all, "ip netns del "+l.NS) {
+		t.Errorf("teardown = %v", cmds)
+	}
+}

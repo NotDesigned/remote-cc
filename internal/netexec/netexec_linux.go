@@ -56,7 +56,7 @@ func enter(prog []string) error {
 	if sock == "" {
 		sock = DefaultSock
 	}
-	fd, reply, err := egress.Dial(sock, node, 40*time.Second)
+	fd, reply, err := egress.Dial(sock, node, os.Getenv(EnvGrant), 40*time.Second)
 	if err != nil {
 		return fmt.Errorf("node %s: %w", node, err)
 	}
@@ -134,6 +134,21 @@ func AccountEmail(out []byte) (loggedIn bool, email string) {
 	return st.LoggedIn, st.Email
 }
 
+// CheckAccount compares the account Claude Code is logged in as with the
+// profile's. A stored setup-token logs in without an email, so that account
+// cannot be compared: it passes with a warning.
+func CheckAccount(loggedIn bool, got, want string) (warning string, err error) {
+	switch {
+	case !loggedIn:
+		return "", fmt.Errorf("this Claude account is not logged in yet; log in as %s first (login --rcb)", want)
+	case got == "":
+		return fmt.Sprintf("Claude Code reports no account email (a stored token?); not checked against the profile's %s", want), nil
+	case !strings.EqualFold(got, want):
+		return "", fmt.Errorf("Claude Code is logged in as %s, but the profile's browser is signed in as %s; refusing to start (log out and log in again with --rcb)", got, want)
+	}
+	return "", nil
+}
+
 // check runs inside the namespace: verify the exit (and with it that the
 // node works at all), the Claude account, then exec the program.
 func check(prog []string) error {
@@ -147,8 +162,10 @@ func check(prog []string) error {
 		return fmt.Errorf("no network through node %s: %v", label, err)
 	}
 	if !ExitAllowed(exit.IP, os.Getenv(EnvExpectIP)) {
-		return fmt.Errorf("node %s exits at %s, but remote-claude-browser recorded %s for this profile; refusing to start (re-check the profile's exit in the workbench)",
+		// remote-cc re-checks the exit with remote-claude-browser and retries once.
+		fmt.Fprintf(os.Stderr, "rcc: node %s exits at %s, but remote-claude-browser recorded %s for this profile; refusing to start\n",
 			label, exit.IP, os.Getenv(EnvExpectIP))
+		os.Exit(ExitMismatch)
 	}
 	tz := os.Getenv(EnvTZ)
 	if tz == "" {
@@ -160,15 +177,16 @@ func check(prog []string) error {
 	if want := os.Getenv(EnvEmail); want != "" {
 		out, _ := exec.Command(prog[0], "auth", "status", "--json").Output()
 		in, got := AccountEmail(out)
-		switch {
-		case !in:
-			return fmt.Errorf("this Claude account is not logged in yet; log in as %s first (login --rcb)", want)
-		case !strings.EqualFold(got, want):
-			return fmt.Errorf("Claude Code is logged in as %s, but the profile's browser is signed in as %s; refusing to start (log out and log in again with --rcb)", got, want)
+		warn, err := CheckAccount(in, got, want)
+		if err != nil {
+			return err
+		}
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, "rcc: warning:", warn)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "rcc: network via node %s: exit %s (%s, %s), TZ=%s\n", label, exit.IP, exit.City, exit.Country, tz)
-	for _, k := range []string{EnvSock, EnvNode, EnvResolv, EnvExpectIP, EnvTZ, EnvEmail, EnvLabel, EnvCheckURL} {
+	for _, k := range []string{EnvSock, EnvNode, EnvGrant, EnvResolv, EnvExpectIP, EnvTZ, EnvEmail, EnvLabel, EnvCheckURL} {
 		os.Unsetenv(k)
 	}
 	path, err := exec.LookPath(prog[0])

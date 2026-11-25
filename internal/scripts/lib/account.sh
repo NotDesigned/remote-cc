@@ -25,7 +25,7 @@ rcb_guard() {
 
 # rcb_env: parameters for rcc-shim's netexec stages (internal/netexec).
 rcb_env() {
-  export RCC_EGRESS_NODE="$RCB_NODE" RCC_EGRESS_RESOLV="$1" RCC_EGRESS_EXPECT_IP="${RCB_EXPECT_IP:-}" \
+  export RCC_EGRESS_NODE="$RCB_NODE" RCC_EGRESS_GRANT="${RCB_GRANT:-}" RCC_EGRESS_RESOLV="$1" RCC_EGRESS_EXPECT_IP="${RCB_EXPECT_IP:-}" \
     RCC_EGRESS_TZ="${RCB_TZ:-}" RCC_EGRESS_EMAIL="${RCB_EMAIL:-}" RCC_EGRESS_LABEL="${RCB_LABEL:-}"
 }
 

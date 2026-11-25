@@ -3,6 +3,9 @@ package cli
 import (
 	"reflect"
 	"testing"
+
+	"remote-cc/internal/client"
+	"remote-cc/internal/rcb"
 )
 
 func TestParse(t *testing.T) {
@@ -31,5 +34,32 @@ func TestParse(t *testing.T) {
 	}
 	if tg, _, _, _ := parse([]string{"-v"}, flags{}); !tg.Verbose || len(tg.Args) != 0 {
 		t.Fatalf("-v: %+v", tg)
+	}
+}
+
+func TestPinAccount(t *testing.T) {
+	t.Setenv("RCC_ACCOUNT", "work")
+	p := &rcb.Profile{ID: "p-1"}
+	// --rcb: the profile's account, RCC_ACCOUNT ignored.
+	c := client.Config{RCB: p}
+	if err := pinAccount(&c); err != nil || c.Account != "rcb-p-1" {
+		t.Errorf("rcb: %q %v", c.Account, err)
+	}
+	c = client.Config{RCB: p, Account: "rcb-p-1"}
+	if err := pinAccount(&c); err != nil || c.Account != "rcb-p-1" {
+		t.Errorf("rcb, same --account: %q %v", c.Account, err)
+	}
+	c = client.Config{RCB: p, Account: "default"}
+	if err := pinAccount(&c); err == nil {
+		t.Error("rcb with another --account accepted")
+	}
+	// Without --rcb: --account, else RCC_ACCOUNT.
+	c = client.Config{}
+	if pinAccount(&c); c.Account != "work" {
+		t.Errorf("env: %q", c.Account)
+	}
+	c = client.Config{Account: "home"}
+	if pinAccount(&c); c.Account != "home" {
+		t.Errorf("flag: %q", c.Account)
 	}
 }

@@ -27,9 +27,10 @@ type Layout struct {
 	Subnet string
 }
 
-// LayoutFor derives a node's names and addresses; offset resolves slot collisions.
-func LayoutFor(id string, offset int) Layout {
-	sum := sha256.Sum256([]byte(id))
+// LayoutFor derives a runtime's names and addresses from its seed (see
+// layoutSeed); offset resolves slot collisions.
+func LayoutFor(seed string, offset int) Layout {
+	sum := sha256.Sum256([]byte(seed))
 	h := hex.EncodeToString(sum[:])
 	slot := (int(binary.BigEndian.Uint16(sum[:2]))+offset)%16382 + 1
 	base := slot * 4
@@ -45,6 +46,13 @@ func LayoutFor(id string, offset int) Layout {
 
 // Runner runs the system commands; tests replace it.
 type Runner func(name string, args ...string) error
+
+// Spawner prepares argv to run inside the named namespace; tests replace it.
+type Spawner func(ctx context.Context, ns string, argv ...string) *exec.Cmd
+
+func nsSpawn(ctx context.Context, ns string, argv ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "ip", append([]string{"netns", "exec", ns}, argv...)...)
+}
 
 func execRunner(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -94,23 +102,35 @@ func setupCommands(l Layout) [][]string {
 func teardownCommands(l Layout) [][]string {
 	return [][]string{
 		{"iptables", "-t", "nat", "-D", "POSTROUTING", "-s", l.Subnet, "-j", "MASQUERADE"},
-		{"ip", "netns", "del", l.NS}, // removes the veth pair too
+		// A session may still hold the namespace, which then outlives
+		// "netns del" with the veth pair in it: deleting our end removes both.
+		{"ip", "link", "del", l.HostIf},
+		{"ip", "netns", "del", l.NS},
 	}
 }
 
-// nodeRuntime is one node's namespace with a supervised Mihomo in it.
+// nodeRuntime is one tenant's namespace for a node with a supervised Mihomo in it.
 type nodeRuntime struct {
+	key    runtimeKey
 	node   Node
 	layout Layout
 	dir    string
 	run    Runner
+	spawn  Spawner
 	mihomo string
 	dns    string
+	used   time.Time     // last requested; guarded by Daemon.mu
+	done   chan struct{} // closed when stop begins
+	once   sync.Once
 
 	mu      sync.Mutex
 	ready   chan struct{} // closed while the TUN route is up
 	cancel  context.CancelFunc
 	stopped chan struct{}
+}
+
+func (r *nodeRuntime) String() string {
+	return fmt.Sprintf("user %s, node %s", r.key.user, r.node.ID)
 }
 
 func (r *nodeRuntime) start() error {
@@ -132,6 +152,7 @@ func (r *nodeRuntime) start() error {
 			for _, t := range teardownCommands(r.layout) {
 				r.run(t[0], t[1:]...)
 			}
+			os.RemoveAll(r.dir)
 			return err
 		}
 	}
@@ -162,25 +183,25 @@ func (r *nodeRuntime) supervise(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		started := time.Now()
-		cmd := exec.CommandContext(ctx, "ip", "netns", "exec", r.layout.NS, r.mihomo, "-d", r.dir, "-f", filepath.Join(r.dir, "config.json"))
-		cmd.Stdout, cmd.Stderr = logWriter(r.node.ID), logWriter(r.node.ID)
+		cmd := r.spawn(ctx, r.layout.NS, r.mihomo, "-d", r.dir, "-f", filepath.Join(r.dir, "config.json"))
+		cmd.Stdout, cmd.Stderr = r.logWriter(), r.logWriter()
 		if err := cmd.Start(); err != nil {
-			log.Printf("node %s: mihomo: %v", r.node.ID, err)
+			log.Printf("%s: mihomo: %v", r, err)
 		} else {
 			done := make(chan struct{})
 			go func() {
 				if err := r.waitTun(ctx, done); err == nil {
 					r.markReady(true)
-					log.Printf("node %s (%s): up via %s", r.node.ID, r.node.Name, r.layout.NS)
+					log.Printf("%s (%s): up via %s", r, r.node.Name, r.layout.NS)
 				} else if ctx.Err() == nil {
-					log.Printf("node %s: %v", r.node.ID, err)
+					log.Printf("%s: %v", r, err)
 				}
 			}()
 			err := cmd.Wait()
 			close(done)
 			r.markReady(false)
 			if ctx.Err() == nil {
-				log.Printf("node %s: mihomo exited: %v", r.node.ID, err)
+				log.Printf("%s: mihomo exited: %v", r, err)
 			}
 		}
 		if time.Since(started) > time.Minute {
@@ -221,20 +242,27 @@ func (r *nodeRuntime) wait(ctx context.Context) error {
 	select {
 	case <-ready:
 		return nil
+	case <-r.done:
+		return fmt.Errorf("node %s (%s) stopped while starting; start the session again", r.node.ID, r.node.Name)
 	case <-ctx.Done():
 		return fmt.Errorf("node %s (%s) did not come up; check the node in remote-claude-browser", r.node.ID, r.node.Name)
 	}
 }
 
+// stop ends the runtime once; a stale second call (a refresh that raced a
+// restart) is a no-op.
 func (r *nodeRuntime) stop() {
-	if r.cancel != nil {
-		r.cancel()
-		<-r.stopped
-	}
-	for _, c := range teardownCommands(r.layout) {
-		r.run(c[0], c[1:]...)
-	}
-	os.RemoveAll(r.dir)
+	r.once.Do(func() {
+		close(r.done)
+		if r.cancel != nil {
+			r.cancel()
+			<-r.stopped
+		}
+		for _, c := range teardownCommands(r.layout) {
+			r.run(c[0], c[1:]...)
+		}
+		os.RemoveAll(r.dir)
+	})
 }
 
 type prefixWriter struct{ prefix string }
@@ -248,4 +276,4 @@ func (w prefixWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func logWriter(id string) prefixWriter { return prefixWriter{"node " + id + ": mihomo"} }
+func (r *nodeRuntime) logWriter() prefixWriter { return prefixWriter{r.String() + ": mihomo"} }

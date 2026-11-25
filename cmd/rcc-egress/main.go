@@ -1,8 +1,9 @@
 //go:build linux
 
-// Command rcc-egress is the egress host of a remote-cc server: it syncs proxy
-// nodes from remote-claude-browser and gives each remote-cc session the
-// network namespace of its node, whose only way out is that node.
+// Command rcc-egress is the egress host of a remote-cc server: each remote-cc
+// session presents a grant from remote-claude-browser, rcc-egress redeems it
+// for the session's proxy node and hands over that node's network namespace,
+// whose only way out is the node.
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +22,13 @@ import (
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(k string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil && v > 0 {
 		return v
 	}
 	return def
@@ -35,9 +44,11 @@ func main() {
 	flag.StringVar(&o.UsersDir, "users", env("RCC_EGRESS_USERS", "/run/rcc-egress/users"), "per-user socket directories")
 	flag.StringVar(&o.Mihomo, "mihomo", env("RCC_EGRESS_MIHOMO", "/usr/local/bin/mihomo"), "Mihomo binary")
 	flag.StringVar(&o.BootstrapDNS, "bootstrap-dns", env("RCC_EGRESS_BOOTSTRAP_DNS", ""), "resolver for node hostnames")
-	every := flag.Duration("sync", 5*time.Minute, "node sync interval")
+	every := flag.Duration("refresh", 5*time.Minute, "how often running nodes are re-checked")
+	flag.IntVar(&o.MaxRuntimes, "max-nodes", envInt("RCC_EGRESS_MAX_NODES", 64), "node namespaces (each with a Mihomo) run at once")
+	flag.IntVar(&o.MaxPerUser, "max-nodes-per-user", envInt("RCC_EGRESS_MAX_NODES_PER_USER", 8), "of them per remote-cc user; the least recently used makes room")
 	flag.Parse()
-	o.SyncEvery = *every
+	o.RefreshEvery = *every
 	log.SetPrefix("rcc-egress: ")
 	if o.RCBURL != "" {
 		b, err := os.ReadFile(tokenFile)
@@ -45,9 +56,6 @@ func main() {
 			log.Fatalf("host token: %v", err)
 		}
 		o.Token = strings.TrimSpace(string(b))
-	}
-	if o.RCBURL == "" && o.NodesFile == "" {
-		log.Print("no remote-claude-browser configured; serving cached nodes only")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

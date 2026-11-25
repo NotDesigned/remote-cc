@@ -14,11 +14,13 @@ RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w" -o
 FROM debian:bookworm-slim AS mihomo
 ARG TARGETARCH
 ARG MIHOMO_VERSION=v1.19.34
+# TARGETARCH is empty with the legacy builder: use this image's own architecture.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
- && case "$TARGETARCH" in \
+ && arch=${TARGETARCH:-$(dpkg --print-architecture)} \
+ && case "$arch" in \
       amd64) f=mihomo-linux-amd64-v1-v1.19.34.gz; s=0c07340a01408d033dda4088ea2a4c1e4d82aeed7b2f84f7c046e93b6ff3290c ;; \
       arm64) f=mihomo-linux-arm64-v1.19.34.gz; s=daaf78a6240a282cdfd75bcbf98fe321f6bd52765cc29e79f344191198f0b50f ;; \
-      *) echo "unsupported arch $TARGETARCH" >&2; exit 1 ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
     esac \
  && curl -fsSL -o /m.gz "https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VERSION/$f" \
  && echo "$s  /m.gz" | sha256sum -c - \

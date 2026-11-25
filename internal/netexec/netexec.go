@@ -15,6 +15,7 @@ const (
 
 	EnvSock     = "RCC_EGRESS_SOCK"      // egress daemon socket
 	EnvNode     = "RCC_EGRESS_NODE"      // node id
+	EnvGrant    = "RCC_EGRESS_GRANT"     // the session's grant from remote-claude-browser
 	EnvResolv   = "RCC_EGRESS_RESOLV"    // file to write the resolver config to
 	EnvExpectIP = "RCC_EGRESS_EXPECT_IP" // comma-separated exit IPs to accept; "" = any
 	EnvTZ       = "RCC_EGRESS_TZ"        // TZ for the program
@@ -23,6 +24,10 @@ const (
 	EnvCheckURL = "RCC_EGRESS_CHECK_URL" // exit lookup; default https://ipwho.is/
 
 	DefaultSock = "/run/rcc-egress/egress.sock"
+
+	// ExitMismatch is the exit status when the node exits elsewhere than
+	// remote-claude-browser recorded; remote-cc then has the exit re-checked.
+	ExitMismatch = 117
 )
 
 // Is reports whether args (after the program name) start a netexec stage.

@@ -1,6 +1,7 @@
-# remote-cc egress host: syncs proxy nodes from remote-claude-browser and runs
-# each in a network namespace of its own; user containers get a socket in
-# <data>/egress/users/<user> to ask for one (see deploy/README.md).
+# remote-cc egress host: redeems each --rcb session's grant with
+# remote-claude-browser and runs that node in a network namespace of its own;
+# user containers get a socket in <data>/egress/users/<user> to ask for one
+# (see deploy/README.md).
 services:
   egress:
     image: ${RCC_EGRESS_IMAGE:-ghcr.io/notdesigned/remote-cc-egress:latest}
@@ -21,6 +22,9 @@ services:
     environment:
       RCC_EGRESS_RCB_URL: ${RCC_EGRESS_RCB_URL:?}
       RCC_EGRESS_TOKEN_FILE: /etc/rcc-egress/token
+      # Namespaces (one per user and node) on this host, and per remote-cc user.
+      RCC_EGRESS_MAX_NODES: ${RCC_EGRESS_MAX_NODES:-64}
+      RCC_EGRESS_MAX_NODES_PER_USER: ${RCC_EGRESS_MAX_NODES_PER_USER:-8}
     volumes:
       - ${RCC_EGRESS_DATA:?}/state:/var/lib/rcc-egress
       - ${RCC_EGRESS_DATA:?}/users:/run/rcc-egress/users

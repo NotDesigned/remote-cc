@@ -43,8 +43,8 @@ rollback() {
   if [ -d "$DIR/users/$NAME" ]; then (cd "$DIR/users/$NAME" && docker compose down >/dev/null 2>&1) || true; fi
   [ -d "$u/root" ] && mv "$u/root" "$DATA/root"
   [ -d "$u/ssh" ] && mv "$u/ssh" "$DATA/ssh"
-  rm -rf "$u" "$DATA/keys/$NAME" "$DATA/gateway" "$DIR/users" "$DIR/multi-user"
-  rmdir "$DATA/users" "$DATA/keys" "$DATA/invites" 2>/dev/null || true
+  rm -rf "$u" "$DATA/keys/$NAME" "$DATA/gateway" "$DIR/users" "$DIR/multi-user" "$DATA/egress/users/$NAME"
+  rmdir "$DATA/users" "$DATA/keys" "$DATA/invites" "$DATA/egress/users" "$DATA/egress" 2>/dev/null || true
   cp -a "$DIR/.single-$ts/compose.yml" "$DIR/.single-$ts/.env" "$DIR/"
   (cd "$DIR" && docker compose up -d >&2)
   exit 6
@@ -53,7 +53,7 @@ rollback() {
 (cd "$DIR" && docker compose down >&2) || { echo "rcc: could not stop $old" >&2; exit 4; }
 umask 022
 {
-  mkdir -p "$u" "$DATA/keys/$NAME" "$DATA/gateway/etc" "$DATA/gateway/ssh" "$DATA/invites" "$DIR/users/$NAME" &&
+  mkdir -p "$u" "$DATA/keys/$NAME" "$DATA/gateway/etc" "$DATA/gateway/ssh" "$DATA/invites" "$DIR/users/$NAME" "$DATA/egress/users/$NAME" &&
   chmod 700 "$DATA/users" "$u" "$DATA/gateway/ssh" &&
   mv "$DATA/root" "$u/root" && mv "$DATA/ssh" "$u/ssh" &&
   cp -a "$u/ssh/." "$DATA/gateway/ssh/" &&
@@ -64,7 +64,7 @@ umask 022
   printf 'RCC_PORT=%s\nRCC_PUBLISH=%s\nRCC_DATA=%s\nRCC_IMAGE=%s\nRCC_GATEWAY=%s\nRCC_NETWORK=%s\n' "$PORT" "$PUBLISH" "$DATA" "$IMAGE" "$GW" "$NET" > "$DIR/.env" && echo "COMPOSE_PROJECT_NAME=$NET" >> "$DIR/.env" &&
   touch "$DIR/multi-user" &&
   printf '%s' "$COMPOSE_USER_B64" | base64 -d > "$DIR/users/$NAME/compose.yml" &&
-  printf 'RCC_NAME=rcc-%s\nRCC_DATA=%s\nRCC_KEYS=%s\nRCC_IMAGE=%s\nRCC_NETWORK=%s\n' "$NAME" "$u" "$DATA/keys/$NAME" "$IMAGE" "$NET" > "$DIR/users/$NAME/.env" && echo "COMPOSE_PROJECT_NAME=rcc-$NAME" >> "$DIR/users/$NAME/.env" &&
+  printf 'RCC_NAME=rcc-%s\nRCC_DATA=%s\nRCC_KEYS=%s\nRCC_IMAGE=%s\nRCC_NETWORK=%s\nRCC_EGRESS_DIR=%s\n' "$NAME" "$u" "$DATA/keys/$NAME" "$IMAGE" "$NET" "$DATA/egress/users/$NAME" > "$DIR/users/$NAME/.env" && echo "COMPOSE_PROJECT_NAME=rcc-$NAME" >> "$DIR/users/$NAME/.env" &&
   { docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null; } &&
   (cd "$DIR" && docker compose up -d >&2) &&
   (cd "$DIR/users/$NAME" && docker compose up -d >&2)

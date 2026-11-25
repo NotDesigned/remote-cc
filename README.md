@@ -114,7 +114,24 @@ A 上执行的命令会记录到日志：Linux 是 `~/.cache/rcc/last.log`，Win
 
 ### 以浏览器配置的身份运行（remote-claude-browser）
 
-和 [remote-claude-browser](https://github.com/NotDesigned/remote-claude-browser) 联动后，`remote-cc --rcb 配置 服务器-cc` 使用该浏览器配置的 Claude 账号，Claude Code 的全部网络流量经该配置的代理节点出去，与网页版同一个出口和时区。需要在服务器上部署出口主机（`server egress`），并在本机执行 `rcb login`，见 [deploy/README.md](deploy/README.md#经-remote-claude-browser-的节点出网可选)。
+和 [remote-claude-browser](https://github.com/NotDesigned/remote-claude-browser)（RCB）联动后，`remote-cc --rcb 配置` 使用该浏览器配置的 Claude 账号，Claude Code 的全部网络流量经该配置的代理节点出去，与网页版同一个出口和时区。服务器上先由管理员部署出口主机（`server egress`，RCB 管理员批准），然后在本机：
+
+```sh
+remote-cc rcb login https://browser.example.com   # 终端显示连接码和链接，在 RCB 里批准这台电脑
+remote-cc rcb profiles                            # 你的配置：Claude 账号、节点、出口、时区
+cd 项目 && remote-cc rcb use 配置 [服务器-cc]      # 这个目录（及子目录）默认用这个配置和服务器
+remote-cc login --rcb 配置                        # 第一次：登录页在该配置的浏览器里打开，点「授权」即可
+remote-cc                                         # 之后直接运行；也可以 remote-cc --rcb 配置 服务器-cc
+```
+
+- 电脑由你本人在 RCB 里批准；只批准自己刚发起、连接码一致的请求。
+- 一键登录失败（认不出链接、RCB 连不上、在 RCB 里取消了）时，按提示自己打开链接，把授权码粘贴回终端。
+- 每次启动会话都向 RCB 要一份短期授权，所以**启动时要能连上 RCB**；已经在运行的会话不受影响。
+- 启动前核对：出口 IP 必须等于 RCB 记录的出口（不一致时自动请 RCB 重新检查一次）、时区设为该出口的时区、Claude 登录邮箱与配置一致。
+- `update-server` 同时更新出口主机（有会话进行时拒绝，除非 `--force`）。
+- 断开这台电脑：在 RCB 的「代理与 API → remote-cc」里点「断开」；`remote-cc rcb logout` 只删除本机保存的连接。
+
+部署、原理、各令牌的权限、撤销和限制见 [deploy/README.md](deploy/README.md#经-remote-claude-browser-的节点出网可选)。
 
 ### 账号
 

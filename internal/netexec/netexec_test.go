@@ -44,3 +44,19 @@ func TestIs(t *testing.T) {
 		t.Error("ordinary command taken as a stage")
 	}
 }
+
+func TestCheckAccount(t *testing.T) {
+	if w, err := CheckAccount(true, "A@example.com", "a@example.com"); w != "" || err != nil {
+		t.Errorf("match: %q %v", w, err)
+	}
+	if _, err := CheckAccount(true, "b@example.com", "a@example.com"); err == nil {
+		t.Error("other account accepted")
+	}
+	if _, err := CheckAccount(false, "", "a@example.com"); err == nil {
+		t.Error("logged out accepted")
+	}
+	// A stored setup-token: logged in, no email to compare.
+	if w, err := CheckAccount(true, "", "a@example.com"); err != nil || w == "" {
+		t.Errorf("token login: %q %v", w, err)
+	}
+}

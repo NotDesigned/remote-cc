@@ -112,6 +112,14 @@ func dial(addr string) (net.Conn, error) {
 
 var refVarRe = regexp.MustCompile(`\$\{?(__[A-Za-z0-9_]+)`)
 
+// secretEnv are the server account's credentials. Claude Code passes them on
+// to its shell commands, but A's commands have no use for them, and an rcb
+// account's token must never reach a machine outside its node.
+var secretEnv = map[string]bool{
+	"CLAUDE_CODE_OAUTH_TOKEN": true, "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": true,
+	"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
+}
+
 // forwardEnv picks the variables Claude Code sets for its shell commands.
 // B's general environment (PATH, HOME, …) is deliberately not forwarded:
 // commands must see A's own environment.
@@ -128,7 +136,7 @@ func forwardEnv(environ []string, cmd string) map[string]string {
 	for _, kv := range environ {
 		k, v, _ := strings.Cut(kv, "=")
 		switch {
-		case k == "CLAUDE_CODE_SHELL_PREFIX" || strings.HasPrefix(k, "RCC_"):
+		case k == "CLAUDE_CODE_SHELL_PREFIX" || strings.HasPrefix(k, "RCC_") || secretEnv[k]:
 		case keep[k], referenced[k],
 			strings.HasPrefix(k, "CLAUDE"), strings.HasPrefix(k, "__CLAUDE"):
 			out[k] = v

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"remote-cc/deploy"
+	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/scripts"
 	"remote-cc/internal/sshconf"
@@ -354,7 +354,8 @@ func Migrate(c Config, name, alias string, force bool) error {
 	return nil
 }
 
-// Update pulls the latest image and recreates containers that changed.
+// Update pulls the latest images and recreates containers that changed,
+// the egress host's too when one is installed (same token and settings).
 func Update(c Config, image string, force bool) error {
 	conn, err := c.open()
 	if err != nil {
@@ -363,7 +364,8 @@ func Update(c Config, image string, force bool) error {
 	defer conn.Close()
 	fmt.Fprintf(os.Stderr, "rcc: updating remote-cc server on %s …\n", c.Dest)
 	f, err := conn.Elevated(remote.Vars("DIR", c.InstallDir, "IMAGE", image, "FORCE", remote.Bool(force),
-		"COMPOSE_GW_B64", remote.Base64(deploy.ComposeGateway), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser)),
+		"COMPOSE_GW_B64", remote.Base64(deploy.ComposeGateway), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser),
+		"COMPOSE_EGRESS_B64", remote.Base64(deploy.ComposeEgress)),
 		scripts.Host("server/update.sh"))
 	if err != nil {
 		return fmt.Errorf("update failed: %w", err)
@@ -379,6 +381,9 @@ func Update(c Config, image string, force bool) error {
 		fmt.Printf("remote-cc server is up to date (%s); its compose files were refreshed\n", f["after"])
 	default:
 		fmt.Printf("remote-cc server updated: %s -> %s\n", dash(f["before"]), dash(f["after"]))
+	}
+	if f["egress"] == "updated" {
+		fmt.Println("egress host updated (new image or compose file)")
 	}
 	return nil
 }
@@ -426,20 +431,27 @@ func dash(s string) string {
 
 // Egress installs or updates the egress host: Claude Code sessions started
 // with --rcb then run in the network namespace of their browser profile's
-// proxy node, synced from remote-claude-browser at rcbURL with a host token
-// (asked for here, or RCC_EGRESS_TOKEN). image "" = the published one.
+// proxy node. The host token comes from remote-claude-browser at rcbURL,
+// approved there by an administrator (or RCC_EGRESS_TOKEN).
+// image "" = the published one.
 func Egress(c Config, rcbURL, image string) error {
-	u, err := url.Parse(rcbURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return errors.New("--rcb needs the remote-claude-browser address, e.g. https://browser.example.com")
+	base, err := rcb.NormalizeURL(rcbURL)
+	if err != nil {
+		return err
 	}
 	token := strings.TrimSpace(os.Getenv("RCC_EGRESS_TOKEN"))
 	if token == "" {
-		token, err = remote.ReadPassword("host token (remote-claude-browser: 代理与 API → remote-cc → 出口主机): ")
+		c.defaults()
+		name := c.publicHost()
+		if c.Name != "remote-cc" {
+			name += " (" + c.Name + ")"
+		}
+		token, err = rcb.Connect(base, "host", name, func(code, link string) {
+			fmt.Fprintf(os.Stderr, "rcc: an administrator of remote-claude-browser approves this egress host:\n\n  %s\n\n  connection code: %s\n\nrcc: waiting for approval …\n", link, code)
+		})
 		if err != nil {
 			return err
 		}
-		token = strings.TrimSpace(token)
 	}
 	if !strings.HasPrefix(token, "rcch_") {
 		return errors.New("that is not a host token (they start with rcch_)")
@@ -450,22 +462,23 @@ func Egress(c Config, rcbURL, image string) error {
 	}
 	defer conn.Close()
 	fmt.Fprintf(os.Stderr, "rcc: installing the egress host on %s …\n", c.Dest)
-	out, err := conn.ElevatedInput(remote.Vars("DIR", c.InstallDir, "URL", strings.TrimRight(u.String(), "/"),
-		"EIMAGE", image, "COMPOSE_B64", remote.Base64(deploy.ComposeEgress)), scripts.Host("server/egress.sh"), token+"\n")
+	out, err := conn.ElevatedInput(remote.Vars("DIR", c.InstallDir, "URL", base, "EIMAGE", image,
+		"COMPOSE_B64", remote.Base64(deploy.ComposeEgress), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser)),
+		scripts.Host("server/egress.sh"), token+"\n")
 	if err != nil {
 		return fmt.Errorf("egress setup failed: %w", err)
 	}
 	f := remote.ParseFacts(out)
-	switch sync := f["sync"]; {
-	case strings.Contains(sync, "synced"):
-		fmt.Printf("egress host is running: %s\n", sync[strings.Index(sync, "synced"):])
-	case sync != "":
-		fmt.Printf("egress host is running, but the first sync failed:\n  %s\n", sync)
-	default:
-		fmt.Println("egress host is running (no sync result yet; see: docker logs " + c.Name + "-egress)")
+	state := "already up to date"
+	if f["recreated"] == "1" {
+		state = "started with the current image and settings"
 	}
-	if m := strings.TrimSpace(f["missing"]); m != "" {
-		fmt.Printf("these users' containers need the new mount: %s\n  run: %s update-server %s\n", m, remote.Prog, c.Dest)
+	fmt.Printf("egress host is running on %s, linked to %s (%s)\n", c.Dest, base, state)
+	if a := strings.TrimSpace(f["attached"]); a != "" {
+		fmt.Printf("attached to it: %s\n", a)
+	}
+	if b := strings.TrimSpace(f["busy"]); b != "" {
+		fmt.Printf("still to attach (sessions running): %s\n  when they end, run: %s update-server %s\n", b, remote.Prog, c.Dest)
 	}
 	return nil
 }

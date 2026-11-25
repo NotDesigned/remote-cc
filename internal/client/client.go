@@ -34,6 +34,7 @@ import (
 	"remote-cc/internal/agent"
 	"remote-cc/internal/embedded"
 	"remote-cc/internal/fsserver"
+	"remote-cc/internal/netexec"
 	"remote-cc/internal/pathmap"
 	"remote-cc/internal/procjob"
 	"remote-cc/internal/rcb"
@@ -59,6 +60,8 @@ type Config struct {
 	// RCB runs claude as this remote-claude-browser profile: its account
 	// (rcb-<id>) and, inside the egress host's namespace, its proxy node.
 	RCB *rcb.Profile
+	// RCBLink reaches the workbench RCB came from (grants, exit checks, logins).
+	RCBLink *rcb.Link
 }
 
 // rcbVars are the run/auth script parameters for a profile ("" without one).
@@ -77,9 +80,10 @@ func rcbVars(p *rcb.Profile, checkEmail bool) string {
 }
 
 type session struct {
-	cfg  Config
-	conn *remote.Conn
-	id   string
+	cfg   Config
+	conn  *remote.Conn
+	id    string
+	grant string // the session's grant from remote-claude-browser (--rcb)
 
 	local, remote string // project dir on A (native) and on the server
 	facts         map[string]string
@@ -157,7 +161,7 @@ func Run(cfg Config) (int, error) {
 	if err := s.check(); err != nil {
 		return 1, err
 	}
-	return s.start()
+	return s.startRCB()
 }
 
 func (s *session) check() error {
@@ -305,7 +309,7 @@ func (s *session) start() (int, error) {
 	// Claude Code, interactive.
 	sandbox := s.facts["uid"] == "0" && !s.cfg.NoIsSandbox
 	run := s.conn.Script(true, nil, common+remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox), "LOCAL_GIT", remote.Bool(!s.cfg.RemoteGit))+
-		rcbVars(s.cfg.RCB, true)+remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
+		rcbVars(s.cfg.RCB, true)+remote.Vars("RCB_GRANT", s.grant)+remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
 	run.Stdin, run.Stdout, run.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The tty is in raw mode while ssh runs; keep stray signals from killing
 	// rcc before it can clean up.
@@ -399,3 +403,58 @@ type rwc struct {
 
 func (x rwc) Write(p []byte) (int, error) { return x.w.Write(p) }
 func (x rwc) Close() error                { return x.w.Close() }
+
+// startRCB starts the session; with --rcb it does so through rcbRun.
+func (s *session) startRCB() (int, error) {
+	if s.cfg.RCB == nil {
+		return s.start()
+	}
+	return s.rcbRun(func(grant string) (int, error) {
+		s.grant = grant
+		return s.start()
+	})
+}
+
+// rcbRun runs fn (a session or an account command) as the --rcb profile with
+// a fresh grant. Without a recorded exit any exit would pass the node check,
+// so it has the workbench check the exit first and refuses if it cannot.
+// When the node exits elsewhere than recorded, it has the exit re-checked
+// and runs fn once more with the fresh one.
+func (s *session) rcbRun(fn func(grant string) (int, error)) (int, error) {
+	p := s.cfg.RCB
+	if s.cfg.RCBLink == nil {
+		return 1, errors.New("--rcb needs this machine linked to remote-claude-browser")
+	}
+	if p.Exit == nil || p.Exit.IP == "" || p.Exit.TimeZone == "" {
+		fmt.Fprintln(os.Stderr, "rcc: remote-claude-browser has no checked exit for this profile yet; checking it now …")
+		exit, err := rcb.Check(*s.cfg.RCBLink, p.ID)
+		if err == nil && exit.IP == "" {
+			err = errors.New("no exit address reported")
+		}
+		if err != nil {
+			return 1, fmt.Errorf("could not check profile %s's exit through node %s (%v); refusing to run without a known exit", p.Label(), p.Node.Name, err)
+		}
+		fmt.Fprintf(os.Stderr, "rcc: the profile's exit is %s (%s)\n", exit.IP, exit.TimeZone)
+		p.Exit = &exit
+	}
+	for attempt := 0; ; attempt++ {
+		g, err := rcb.Grant(*s.cfg.RCBLink, p.ID)
+		if err != nil {
+			return 1, err
+		}
+		code, err := fn(g)
+		if err != nil || code != netexec.ExitMismatch || attempt > 0 {
+			return code, err
+		}
+		fmt.Fprintln(os.Stderr, "rcc: re-checking the profile's exit with remote-claude-browser …")
+		exit, err := rcb.Check(*s.cfg.RCBLink, p.ID)
+		if err != nil {
+			return code, err
+		}
+		if exit.IP == p.Exit.IP {
+			return code, fmt.Errorf("remote-claude-browser still sees exit %s for node %s; the egress host reaches the node differently", exit.IP, p.Node.Name)
+		}
+		fmt.Fprintf(os.Stderr, "rcc: the profile's exit is now %s (%s); starting again\n", exit.IP, exit.TimeZone)
+		p.Exit = &exit
+	}
+}

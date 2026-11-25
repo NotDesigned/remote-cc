@@ -7,11 +7,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"golang.org/x/term"
 
 	"remote-cc/internal/agent"
 	"remote-cc/internal/client"
@@ -42,8 +46,10 @@ on your machine:
   rcc device list HOST                        your devices and pending invites
   rcc device remove [--force] HOST DEVICE     remove a device (key comment or fingerprint)
   rcc login|logout|status|setup-token [--account NAME | --rcb PROFILE] HOST
-  rcc rcb login URL | profiles | logout   link this machine to remote-claude-browser
-  rcc token [--account NAME] [--clear] HOST   store a setup-token for an account
+  rcc rcb login URL                       link this machine to remote-claude-browser (approve in the workbench)
+  rcc rcb profiles | logout
+  rcc rcb use PROFILE [HOST]              remember for this directory; then just: rcc
+  rcc token [--account NAME | --rcb PROFILE] [--clear] HOST   store a setup-token for an account
   rcc accounts HOST
   rcc update [--check] [--version vX.Y.Z]     replace this program with a release
   rcc version [--check]
@@ -61,7 +67,7 @@ servers (run as root or with sudo on the Docker host):
   rcc remove-server [--purge] [server options] user@host
   rcc server init [server options] user@host                 gateway only
   rcc server migrate --user NAME [--force] user@host           convert a 0.3/0.4 single-container server
-  rcc server egress --rcb URL [--image IMG] user@host          egress host for --rcb sessions (asks for a host token)
+  rcc server egress --rcb URL [--image IMG] user@host          egress host for --rcb sessions (an RCB admin approves it)
       server options: --install-dir DIR --data DIR --image IMG --public-host NAME --name INSTANCE
 
   rcc serve [--listen ADDR] [--token T] [--shell PATH]   the command agent alone (debugging)
@@ -82,6 +88,13 @@ func Main(args []string, version string) int {
 	}
 	remote.Prog = prog
 	if len(args) < 2 {
+		// In a directory set up with `rcb use`, a bare command starts the session.
+		if cwd, err := os.Getwd(); err == nil {
+			if _, _, ok := rcb.Lookup(cwd); ok {
+				_ = procjob.KillOnExit()
+				return runSession(nil)
+			}
+		}
 		usage()
 		return 2
 	}
@@ -213,6 +226,12 @@ func runSession(args []string) int {
 		str:   map[string]*string{"--claude": &c.ClaudePath, "--profile": &c.Profile, "--account": &c.Account, "--rcb": &rcbSel},
 		bools: map[string]*bool{"--no-prompt": &c.NoPrompt, "--no-is-sandbox": &c.NoIsSandbox, "--remote-git": &c.RemoteGit},
 	})
+	if err == nil && len(pos) == 0 {
+		var host string
+		if rcbSel, host, err = rcbDefaults(rcbSel); err == nil {
+			pos = []string{host}
+		}
+	}
 	if err != nil || len(pos) < 1 || len(pos) > 2 {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "rcc:", err)
@@ -220,10 +239,10 @@ func runSession(args []string) int {
 		usage()
 		return 2
 	}
-	if c.Account == "" {
-		c.Account = os.Getenv("RCC_ACCOUNT")
+	if c.RCB, c.RCBLink, err = rcbProfile(rcbSel); err != nil {
+		return fail(err)
 	}
-	if c.RCB, err = rcbProfile(rcbSel); err != nil {
+	if err := pinAccount(&c); err != nil {
 		return fail(err)
 	}
 	t.Dest = pos[0]
@@ -242,17 +261,26 @@ func runAccount(action string, args []string) int {
 		str:   map[string]*string{"--account": &c.Account, "--claude": &c.ClaudePath, "--rcb": &rcbSel},
 		bools: map[string]*bool{"--clear": &clear},
 	})
-	if err != nil || len(pos) != 1 {
-		fmt.Fprintf(os.Stderr, "usage: %s %s [--account NAME] HOST\n", remote.Prog, action)
-		return 2
+	if err == nil && len(pos) == 0 && rcbSel != "" {
+		var host string
+		if rcbSel, host, err = rcbDefaults(rcbSel); err == nil {
+			pos = []string{host}
+		}
 	}
-	if c.Account == "" {
-		c.Account = os.Getenv("RCC_ACCOUNT")
+	if err != nil || len(pos) != 1 {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "rcc:", err)
+		}
+		fmt.Fprintf(os.Stderr, "usage: %s %s [--account NAME | --rcb PROFILE] HOST\n", remote.Prog, action)
+		return 2
 	}
 	if rcbSel != "" && action == "accounts" {
 		return fail(errors.New("accounts lists every account; --rcb does not apply"))
 	}
-	if c.RCB, err = rcbProfile(rcbSel); err != nil {
+	if c.RCB, c.RCBLink, err = rcbProfile(rcbSel); err != nil {
+		return fail(err)
+	}
+	if err := pinAccount(&c); err != nil {
 		return fail(err)
 	}
 	if action == "token" && (clear || (len(after) > 0 && after[0] == "--clear")) {
@@ -487,25 +515,42 @@ func runServe(args []string) int {
 	return fail(a.Serve(l))
 }
 
+// pinAccount picks the Claude account: --rcb always means its profile's own
+// (RCC_ACCOUNT does not apply, a different --account is an error); else
+// --account, else RCC_ACCOUNT.
+func pinAccount(c *client.Config) error {
+	if p := c.RCB; p != nil {
+		if c.Account != "" && c.Account != p.Account() {
+			return fmt.Errorf("--rcb %s uses account %s; drop --account %s", p.ID, p.Account(), c.Account)
+		}
+		c.Account = p.Account()
+		return nil
+	}
+	if c.Account == "" {
+		c.Account = os.Getenv("RCC_ACCOUNT")
+	}
+	return nil
+}
+
 // rcbProfile resolves --rcb against the linked remote-claude-browser.
-func rcbProfile(sel string) (*rcb.Profile, error) {
+func rcbProfile(sel string) (*rcb.Profile, *rcb.Link, error) {
 	if sel == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	l, err := rcb.Load()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ps, err := rcb.Profiles(l)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	p, err := rcb.Find(ps, sel)
+	p, err := chooseProfile(ps, sel)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := p.Usable(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	exit := "exit not checked yet"
 	if p.Exit != nil {
@@ -515,12 +560,62 @@ func rcbProfile(sel string) (*rcb.Profile, error) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "rcc: profile %s → node %s (%s)\n", p.Label(), p.Node.Name, exit)
-	return &p, nil
+	return &p, &l, nil
+}
+
+// chooseProfile is rcb.Find, asking which one when a name fits several.
+func chooseProfile(ps []rcb.Profile, sel string) (rcb.Profile, error) {
+	p, err := rcb.Find(ps, sel)
+	var amb *rcb.AmbiguousError
+	if !errors.As(err, &amb) || !term.IsTerminal(int(os.Stdin.Fd())) {
+		return p, err
+	}
+	fmt.Fprintf(os.Stderr, "%q fits several profiles:\n", sel)
+	for i, c := range amb.Candidates {
+		node := "no node"
+		if c.Node != nil {
+			node = c.Node.Name
+		}
+		fmt.Fprintf(os.Stderr, "  %d) %s  %s  [%s]\n", i+1, c.ID, c.Label(), node)
+	}
+	fmt.Fprint(os.Stderr, "which one? ")
+	var answer string
+	fmt.Scanln(&answer)
+	n, convErr := strconv.Atoi(strings.TrimSpace(answer))
+	if convErr != nil || n < 1 || n > len(amb.Candidates) {
+		return rcb.Profile{}, errors.New("no profile chosen")
+	}
+	return amb.Candidates[n-1], nil
+}
+
+// rcbDefaults fills in what a command left out: the profile (and server)
+// remembered for this directory, else the only remote-cc server here.
+func rcbDefaults(sel string) (profile, host string, err error) {
+	cwd, _ := os.Getwd()
+	u, dir, ok := rcb.Lookup(cwd)
+	if sel == "" {
+		if !ok {
+			return "", "", errors.New("no HOST given, and this directory has no profile (rcb use PROFILE)")
+		}
+		fmt.Fprintf(os.Stderr, "rcc: using profile %s on %s (set for %s)\n", u.Profile, u.Server, dir)
+		return u.Profile, u.Server, nil
+	}
+	if ok && u.Server != "" {
+		return sel, u.Server, nil
+	}
+	switch servers := rcb.Servers(); len(servers) {
+	case 1:
+		return sel, servers[0], nil
+	case 0:
+		return "", "", errors.New("no remote-cc server on this machine yet (join one first)")
+	default:
+		return "", "", fmt.Errorf("which server? give HOST, one of: %s", strings.Join(servers, ", "))
+	}
 }
 
 func runRCB(args []string) int {
 	usage := func() int {
-		fmt.Fprintf(os.Stderr, "usage:\n  %[1]s rcb login URL     link this machine (asks for a client token)\n  %[1]s rcb profiles      your browser profiles\n  %[1]s rcb logout        forget the link\n", remote.Prog)
+		fmt.Fprintf(os.Stderr, "usage:\n  %[1]s rcb login URL          link this machine (approve it in the workbench)\n  %[1]s rcb profiles           your browser profiles\n  %[1]s rcb use PROFILE [HOST] remember for this directory; then just: %[1]s\n  %[1]s rcb logout             forget the link\n", remote.Prog)
 		return 2
 	}
 	if len(args) == 0 {
@@ -534,10 +629,13 @@ func runRCB(args []string) int {
 		}
 		tok := strings.TrimSpace(os.Getenv("RCC_RCB_TOKEN"))
 		if tok == "" {
-			if tok, err = remote.ReadPassword("client token (remote-claude-browser: 代理与 API → remote-cc → 电脑上的 remote-cc): "); err != nil {
+			name, _ := os.Hostname()
+			if tok, err = rcb.Connect(u, "client", name, func(code, link string) {
+				fmt.Fprintf(os.Stderr, "Approve this computer in remote-claude-browser (you need to be logged in there):\n\n  %s\n\n  connection code: %s\n\nwaiting for approval …\n", link, code)
+				openBrowser(link)
+			}); err != nil {
 				return fail(err)
 			}
-			tok = strings.TrimSpace(tok)
 		}
 		if !strings.HasPrefix(tok, "rcck_") {
 			return fail(errors.New("that is not a client token (they start with rcck_)"))
@@ -550,7 +648,40 @@ func runRCB(args []string) int {
 		if err := rcb.Save(l); err != nil {
 			return fail(err)
 		}
-		fmt.Printf("linked to %s: %d profile(s)\n  %s rcb profiles     # list them\n  %s --rcb PROFILE HOST # run Claude Code as one\n", u, len(ps), remote.Prog, remote.Prog)
+		fmt.Printf("linked to %s: %d profile(s)\n  %s rcb profiles            # list them\n  %s rcb use PROFILE         # in a project directory; then just: %s\n", u, len(ps), remote.Prog, remote.Prog, remote.Prog)
+		return 0
+	case args[0] == "use" && (len(args) == 2 || len(args) == 3):
+		l, err := rcb.Load()
+		if err != nil {
+			return fail(err)
+		}
+		ps, err := rcb.Profiles(l)
+		if err != nil {
+			return fail(err)
+		}
+		p, err := chooseProfile(ps, args[1])
+		if err != nil {
+			return fail(err)
+		}
+		if err := p.Usable(); err != nil {
+			return fail(err)
+		}
+		host := ""
+		if len(args) == 3 {
+			host = args[2]
+		} else if _, host, err = rcbDefaults(p.ID); err != nil {
+			return fail(err)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fail(err)
+		}
+		if err := rcb.Remember(cwd, rcb.Use{Profile: p.ID, Server: host}); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("%s now runs as profile %s on %s.\n", cwd, p.Label(), host)
+		fmt.Printf("  first time: %s login --rcb %s     # sign in once, in the profile's browser\n", remote.Prog, p.ID)
+		fmt.Printf("  then:       %s                     # here and in subdirectories\n", remote.Prog)
 		return 0
 	case args[0] == "profiles" && len(args) == 1:
 		l, err := rcb.Load()
@@ -586,4 +717,24 @@ func runRCB(args []string) int {
 		return fail(rcb.Remove())
 	}
 	return usage()
+}
+
+// openBrowser tries to show link in this machine's browser; failure is fine.
+func openBrowser(link string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", link)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", link)
+	default:
+		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+			return
+		}
+		cmd = exec.Command("xdg-open", link)
+	}
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if cmd.Start() == nil {
+		go cmd.Wait()
+	}
 }

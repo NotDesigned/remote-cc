@@ -197,7 +197,7 @@ func Find(ps []Profile, sel string) (Profile, error) {
 		case 1:
 			return m[0], nil
 		default:
-			return Profile{}, fmt.Errorf("%q matches several profiles; use the id:\n%s", sel, list(m))
+			return Profile{}, &AmbiguousError{Sel: sel, Candidates: m}
 		}
 	}
 	return Profile{}, fmt.Errorf("no profile %q; yours are:\n%s", sel, list(ps))
@@ -213,4 +213,14 @@ func list(ps []Profile) string {
 		fmt.Fprintf(&b, "  %s  %s  [%s]\n", p.ID, p.Label(), node)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// AmbiguousError is a selector matching several profiles.
+type AmbiguousError struct {
+	Sel        string
+	Candidates []Profile
+}
+
+func (e *AmbiguousError) Error() string {
+	return fmt.Sprintf("%q matches several profiles; use the id:\n%s", e.Sel, list(e.Candidates))
 }

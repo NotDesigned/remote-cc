@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/term"
 
+	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/scripts"
 )
@@ -26,7 +27,11 @@ func (s *session) accountsDir() string { return s.facts["home"] + "/.local/share
 func (s *session) resolveAccount() error {
 	s.cfg0 = s.facts["cfgdir"]
 	s.ccfg = s.cfg0
-	if p := s.cfg.RCB; p != nil && s.cfg.Account == "" {
+	// --rcb is its profile's account, whatever else asks for one.
+	if p := s.cfg.RCB; p != nil {
+		if a := s.cfg.Account; a != "" && a != p.Account() {
+			return fmt.Errorf("--rcb %s uses account %s; drop --account %s", p.ID, p.Account(), a)
+		}
 		s.cfg.Account = p.Account()
 	}
 	a := s.cfg.Account
@@ -71,12 +76,31 @@ func Account(cfg Config, action string, args []string) (int, error) {
 		return 1, errors.New("a stored token needs an account of its own: drop --account default, or name one with --account NAME")
 	}
 	base := remote.Vars("ACCT_DIR", s.acct, "DEFCFG", s.cfg0, "CLAUDE", s.facts["claude"])
-	if p := s.cfg.RCB; p != nil && action != "accounts" {
-		shim, err := s.installShim()
-		if err != nil {
+	// With --rcb, claude commands run through the profile's node (rcbRun);
+	// the others only touch the account's files.
+	p := s.cfg.RCB
+	if action == "accounts" {
+		p = nil
+	}
+	var shim string
+	if p != nil && action != "token" && action != "token-clear" {
+		if s.cfg.RCBLink == nil {
+			return 1, errors.New("--rcb needs this machine linked to remote-claude-browser")
+		}
+		if shim, err = s.installShim(); err != nil {
 			return 1, err
 		}
-		base += remote.Vars("SHIM", shim) + rcbVars(p, false)
+	}
+	// claude runs one claude command for the account: through the profile's
+	// node with --rcb (fresh grant, exit re-check), else directly.
+	claude := func(args []string, run func(script string) (int, error)) (int, error) {
+		script := remote.SetArgs(args) + scripts.Client("client/auth.sh")
+		if p == nil {
+			return run(base + script)
+		}
+		return s.rcbRun(func(grant string) (int, error) {
+			return run(base + remote.Vars("SHIM", shim, "RCB_GRANT", grant) + rcbVars(p, false) + script)
+		})
 	}
 	interactive := func(script string) (int, error) {
 		c := s.conn.Script(action == "login" || action == "setup-token", nil, script)
@@ -85,22 +109,23 @@ func Account(cfg Config, action string, args []string) (int, error) {
 	}
 	switch action {
 	case "login", "logout", "status":
-		if p := s.cfg.RCB; p != nil && action == "login" {
-			fmt.Fprintf(os.Stderr, "rcc: logging in as profile %s through node %s.\n     Open the sign-in link in that profile's browser in remote-claude-browser", p.Label(), p.Node.Name)
-			if p.Email != "" {
-				fmt.Fprintf(os.Stderr, " (signed in as %s)", p.Email)
-			}
-			fmt.Fprintln(os.Stderr, ", then paste the code here.")
+		run := interactive
+		if p != nil && action == "login" {
+			run = s.rcbLogin
 		}
-		code, err := interactive(base + remote.SetArgs(append([]string{"auth", action}, args...)) + scripts.Client("client/auth.sh"))
-		if p := s.cfg.RCB; err == nil && code == 0 && p != nil && action == "login" && p.Email != "" {
-			s.checkEmail(base, p.Email)
+		code, err := claude(append([]string{"auth", action}, args...), run)
+		if err == nil && code == 0 && p != nil && action == "login" && p.Email != "" {
+			s.checkEmail(base, shim, p.Email)
 		}
 		return code, err
 	case "setup-token":
-		code, err := interactive(base + remote.SetArgs(append([]string{"setup-token"}, args...)) + scripts.Client("client/auth.sh"))
+		code, err := claude(append([]string{"setup-token"}, args...), interactive)
 		if err == nil && code == 0 && s.acct != "" {
-			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for this account, run: %s token --account %s %s\n", remote.Prog, s.cfg.Account, s.cfg.Dest)
+			hint := "--account " + s.cfg.Account
+			if p != nil {
+				hint = "--rcb " + p.ID // rcb-* accounts are only reachable through --rcb
+			}
+			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for this account, run: %s token %s %s\n", remote.Prog, hint, s.cfg.Dest)
 		}
 		return code, err
 	case "token", "token-clear":
@@ -206,21 +231,47 @@ func (s *session) installShim() (string, error) {
 }
 
 // checkEmail warns when the new login is not the profile's Claude account.
-func (s *session) checkEmail(base, want string) {
-	c := s.conn.Script(false, nil, base+remote.SetArgs([]string{"auth", "status", "--json"})+scripts.Client("client/auth.sh"))
+// The sign-in may have taken longer than the login's grant lasts, so the
+// check gets a fresh one.
+func (s *session) checkEmail(base, shim, want string) {
+	unchecked := func(why any) {
+		fmt.Fprintf(os.Stderr, "rcc: could not check which Claude account is logged in (%v); sessions check it when they start.\n", why)
+	}
+	grant, err := rcb.Grant(*s.cfg.RCBLink, s.cfg.RCB.ID)
+	if err != nil {
+		unchecked(err)
+		return
+	}
+	c := s.conn.Script(false, nil, base+remote.Vars("SHIM", shim, "RCB_GRANT", grant)+rcbVars(s.cfg.RCB, false)+
+		remote.SetArgs([]string{"auth", "status", "--json"})+scripts.Client("client/auth.sh"))
 	out, err := c.Output()
 	if err != nil {
+		unchecked(err)
 		return
 	}
+	email, ok := statusEmail(out)
+	switch {
+	case !ok:
+		unchecked("no account status from Claude Code")
+	case email == "":
+		fmt.Fprintln(os.Stderr, "rcc: Claude Code reports no account email; not compared with the profile's.")
+	case !strings.EqualFold(email, want):
+		fmt.Fprintf(os.Stderr, "\nrcc: warning: Claude Code is now logged in as %s, but the profile's browser is signed in as %s.\n     Sessions will refuse to start; log out and log in again with the right account.\n", email, want)
+	default:
+		fmt.Fprintf(os.Stderr, "rcc: logged in as %s, matching the profile.\n", email)
+	}
+}
+
+// statusEmail reads the email from `claude auth status --json` output (after
+// any lines the node check printed); ok is false if there is no status.
+func statusEmail(out []byte) (email string, ok bool) {
 	i := bytes.IndexByte(out, '{')
 	if i < 0 {
-		return
+		return "", false
 	}
 	var st struct{ Email string }
-	json.Unmarshal(out[i:], &st)
-	if st.Email != "" && !strings.EqualFold(st.Email, want) {
-		fmt.Fprintf(os.Stderr, "\nrcc: warning: Claude Code is now logged in as %s, but the profile's browser is signed in as %s.\n     Sessions will refuse to start; log out and log in again with the right account.\n", st.Email, want)
-	} else if st.Email != "" {
-		fmt.Fprintf(os.Stderr, "rcc: logged in as %s, matching the profile.\n", st.Email)
+	if json.NewDecoder(bytes.NewReader(out[i:])).Decode(&st) != nil {
+		return "", false
 	}
+	return st.Email, true
 }
