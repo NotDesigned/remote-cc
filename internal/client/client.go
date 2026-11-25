@@ -1,28 +1,30 @@
-// Package client runs remote-cc on the user's machine (A): a Claude Code
-// session on the server with commands and files coming back to A, the
+// Package client runs remote-cc on the user's computer: a Claude Code
+// session on the server with commands and files coming back here, the
 // account commands, and self-service device management.
 //
 // A session:
 //
-//  1. probe the server (the user's container), pick account and history
-//     profile, install rcc-shim if needed
-//  2. start the command agent on A
-//  3. ssh #1: `sshfs -o slave` on the server ⇄ in-process SFTP server on A,
-//     carrying a reverse forward of the server's command socket to the agent
-//  4. ssh #2 (tty): Claude Code on the server, inside the mount
-//  5. tear everything down when Claude exits
+//  1. probe the server (the user's container) and pick account and history
+//     profile, while the local shell check and, with --rcb, the grant from
+//     remote-claude-browser run alongside; upload rcc-shim if needed
+//  2. one ssh channel: client/session.sh starts the session daemon on the
+//     server (internal/session) and connects to it; Claude Code's terminal,
+//     the sshfs file channel and the commands all run over it
+//  3. if the connection drops, reconnect (client/dial.sh) and resume
+//  4. when Claude Code exits, the daemon ends the server side
 package client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -40,6 +42,7 @@ import (
 	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/scripts"
+	live "remote-cc/internal/session"
 )
 
 // Config is a session (and, partly, an account command).
@@ -92,11 +95,10 @@ type session struct {
 	cfg0, ccfg    string // default config dir; the one claude uses
 	prof          string // history profile dir, "" = none
 	run, cache    string // per-session dir and rcc cache on the server
-	sock          string // command socket on the server
 
-	mu      sync.Mutex
-	stopped bool        // SIGTERM/SIGHUP received
-	runProc *os.Process // interactive ssh, killed on stop
+	hangup   chan struct{}      // closed on SIGTERM/SIGHUP: end Claude Code
+	prefetch <-chan grantResult // --rcb: the first grant, fetched during the probe
+
 }
 
 func newSession(cfg Config) (*session, error) {
@@ -136,32 +138,67 @@ func Run(cfg Config) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	logf := func(f string, a ...any) {
+		if cfg.Verbose {
+			fmt.Fprintf(os.Stderr, "rcc: "+f+"\n", a...)
+		}
+	}
+	logFile := openLog(logf)
+	defer logFile.Close()
+	logger := log.New(logFile, "", log.LstdFlags)
+
+	// While ssh connects and probes: check the local shell, and with --rcb
+	// get the grant from remote-claude-browser.
+	agentTmp, err := os.MkdirTemp("", "rcc-agent-")
+	if err != nil {
+		return 1, err
+	}
+	procjob.RemoveDirOnExit(agentTmp)
+	defer os.RemoveAll(agentTmp)
+	// One token: rcc-shim on the server presents it to the agent here.
+	token := remote.RandHex(16)
+	ag, err := agent.New(agent.Options{Token: token, Logger: logger, TempDir: agentTmp})
+	if err != nil {
+		return 1, err
+	}
+	logger.Printf("shell: %s", ag.Shell())
+	logf("local shell: %s", ag.Shell())
+	shellOK := make(chan error, 1)
+	go func() { shellOK <- ag.Check(local) }()
+	var prefetch <-chan grantResult
+	if cfg.RCB != nil && cfg.RCBLink != nil {
+		prefetch = firstGrant(cfg)
+	}
+
 	s, err := newSession(cfg)
 	if err != nil {
 		return 1, err
 	}
 	defer s.conn.Close()
 	s.local, s.remote = local, pathmap.ToRemote(runtime.GOOS, local)
+	s.prefetch = prefetch
+	if err := <-shellOK; err != nil {
+		logger.Printf("shell check failed: %v", err)
+		return 1, fmt.Errorf("Claude's commands could not run on this machine:\n     %v\n     Set RCC_SHELL to a working bash (on Windows: Git for Windows' bash.exe, e.g. C:\\Program Files\\Git\\bin\\bash.exe)", err)
+	}
 
-	// SIGTERM/SIGHUP (terminal closed, kill): end the interactive ssh and fall
-	// through to the normal teardown instead of leaving server state behind.
+	// SIGTERM/SIGHUP (terminal closed, kill): end Claude Code on the server
+	// and fall through to the normal teardown.
+	s.hangup = make(chan struct{})
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	go func() {
-		for range sigs {
-			s.mu.Lock()
-			s.stopped = true
-			if s.runProc != nil {
-				s.runProc.Kill()
-			}
-			s.mu.Unlock()
-		}
+		<-sigs
+		close(s.hangup)
 	}()
 	if err := s.check(); err != nil {
 		return 1, err
 	}
-	return s.startRCB()
+	return s.startRCB(func(grant string) (int, error) {
+		s.grant = grant
+		return s.start(ag, token, logger, logFile)
+	})
 }
 
 func (s *session) check() error {
@@ -199,7 +236,6 @@ func (s *session) check() error {
 	s.conn.Logf("history profile: %s", map[bool]string{true: s.prof, false: "the account's own"}[s.prof != ""])
 	s.cache = f["home"] + "/.cache/rcc"
 	s.run = s.cache + "/run/" + s.id
-	s.sock = s.run + "/s"
 	return nil
 }
 
@@ -224,133 +260,150 @@ func (s *session) shimBinary() ([]byte, error) {
 	return nil, fmt.Errorf("this rcc build has no rcc-shim for linux/%s; build with scripts/build.sh", goarch)
 }
 
-func (s *session) start() (int, error) {
-	token := remote.RandHex(16)
+// ensureShim puts this rcc's rcc-shim on the server, if it is not there
+// yet (gzip-compressed when the server has gzip), and returns its sha256.
+func (s *session) ensureShim() (string, error) {
 	shim, err := s.shimBinary()
 	if err != nil {
-		return 1, err
+		return "", err
 	}
 	sum := sha256.Sum256(shim)
-	shimSHA := hex.EncodeToString(sum[:])
-	need := !strings.Contains(","+s.facts["shims"], ","+shimSHA+",")
-	s.conn.Logf("mount=%s shim upload=%v", s.remote, need)
-
-	common := remote.Vars("RUN", s.run, "CACHE", s.cache, "SOCK", s.sock, "R", s.remote,
-		"PROF", s.prof, "CFG", s.ccfg, "ACCT_DIR", s.acct, "DEFCFG", s.cfg0, "SHIM_SHA", shimSHA)
-	// Registered before prepare, so a failed prepare leaves nothing behind.
-	defer s.conn.Script(false, nil, common+scripts.Get("client/cleanup.sh")).Run()
-
-	prep := s.conn.Script(false, nil, common+remote.Vars("NEED_SHIM", remote.Bool(need))+scripts.Client("client/prepare.sh"))
-	prep.Stdin = io.MultiReader(strings.NewReader(token+"\n"), bytes.NewReader(map[bool][]byte{true: shim}[need]))
-	prep.Stderr = os.Stderr
-	if err := prep.Run(); err != nil {
-		return 1, fmt.Errorf("preparing the server: %w", err)
+	sha := hex.EncodeToString(sum[:])
+	if strings.Contains(","+s.facts["shims"], ","+sha+",") {
+		s.conn.Logf("rcc-shim: already on the server")
+		return sha, nil
 	}
+	gz := s.facts["bin_gzip"] != ""
+	body := shim
+	if gz {
+		var b bytes.Buffer
+		w, _ := gzip.NewWriterLevel(&b, gzip.BestSpeed)
+		w.Write(shim)
+		w.Close()
+		body = b.Bytes()
+	}
+	s.conn.Logf("rcc-shim: uploading %d KiB", len(body)>>10)
+	c := s.conn.Script(false, nil, remote.Vars("CACHE", s.facts["home"]+"/.cache/rcc", "SHIM_SHA", sha, "GZ", remote.Bool(gz))+scripts.Get("client/upload.sh"))
+	c.Stdin = bytes.NewReader(body)
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		return "", fmt.Errorf("installing rcc-shim on the server: %w", err)
+	}
+	s.facts["shims"] += sha + ","
+	return sha, nil
+}
 
-	// Command agent.
-	logFile := s.openLog()
-	defer logFile.Close()
-	logger := log.New(logFile, "", log.LstdFlags)
-	ag, err := agent.New(agent.Options{Token: token, Logger: logger, TempDir: s.conn.Tmp()})
+func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFile *os.File) (int, error) {
+	shimSHA, err := s.ensureShim()
 	if err != nil {
 		return 1, err
 	}
-	logger.Printf("shell: %s", ag.Shell())
-	s.conn.Logf("local shell: %s", ag.Shell())
-	if err := ag.Check(s.local); err != nil {
-		logger.Printf("shell check failed: %v", err)
-		return 1, fmt.Errorf("Claude's commands could not run on this machine:\n     %v\n     Set RCC_SHELL to a working bash (on Windows: Git for Windows' bash.exe, e.g. C:\\Program Files\\Git\\bin\\bash.exe)", err)
-	}
+	common := remote.Vars("RUN", s.run, "CACHE", s.cache, "R", s.remote, "PROF", s.prof, "CFG", s.ccfg,
+		"ACCT_DIR", s.acct, "DEFCFG", s.cfg0, "SHIM_SHA", shimSHA)
+	// Normally the daemon has already removed everything; this covers a
+	// session that never started.
+	defer func() {
+		c := s.conn.Script(false, []string{"-o", "ConnectTimeout=10"}, common+scripts.Get("client/cleanup.sh"))
+		c.Stdout, c.Stderr = logFile, logFile
+		c.Run()
+	}()
+
 	claudeArgs := s.cfg.ClaudeArgs
 	if !s.cfg.NoPrompt {
 		var added bool
 		claudeArgs, added = withSystemPrompt(claudeArgs, systemPrompt(s.remote, ag.Shell()))
 		s.conn.Logf("system prompt appended: %v", added)
 	}
-	var l net.Listener
-	var target string
-	if runtime.GOOS == "windows" {
-		l, err = net.Listen("tcp", "127.0.0.1:0")
-		if err == nil {
-			target = l.Addr().String()
-		}
-	} else {
-		target = filepath.Join(s.conn.Tmp(), "a.sock")
-		l, err = net.Listen("unix", target)
-	}
-	if err != nil {
-		return 1, err
-	}
-	defer l.Close()
-	go ag.Serve(l)
-
-	// File channel, carrying the reverse forward of the command socket.
-	fs := s.conn.Script(false, []string{"-o", "ExitOnForwardFailure=yes", "-R", s.sock + ":" + target}, common+scripts.Get("client/mount.sh"))
-	fsIn, _ := fs.StdinPipe()
-	fsOut, _ := fs.StdoutPipe()
-	var fsErr bytes.Buffer
-	fs.Stderr = io.MultiWriter(&fsErr, logFile)
-	if err := fs.Start(); err != nil {
-		return 1, err
-	}
-	procjob.TrackProcess(fs.Process.Pid)
-	ready := make(chan struct{})
-	go fsserver.Serve(rwc{&firstRead{r: fsOut, ready: ready}, fsIn}, s.remote)
-	fsExited := make(chan struct{})
-	go func() { fs.Wait(); close(fsExited) }()
-	select {
-	case <-ready:
-	case <-fsExited:
-		return 1, fmt.Errorf("the file mount on the server failed:\n%s", strings.TrimSpace(fsErr.String()))
-	case <-time.After(60 * time.Second):
-		return 1, errors.New("timed out waiting for sshfs on the server")
-	}
-
-	// Claude Code, interactive.
 	sandbox := s.facts["uid"] == "0" && !s.cfg.NoIsSandbox
-	run := s.conn.Script(true, nil, common+remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox), "LOCAL_GIT", remote.Bool(!s.cfg.RemoteGit))+
-		rcbVars(s.cfg.RCB, true)+remote.Vars("RCB_GRANT", s.grant)+remote.SetArgs(claudeArgs)+scripts.Client("client/run.sh"))
-	run.Stdin, run.Stdout, run.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// The tty is in raw mode while ssh runs; keep stray signals from killing
-	// rcc before it can clean up.
+	launch := common + remote.Vars("CLAUDE", s.facts["claude"], "SANDBOX", remote.Bool(sandbox), "LOCAL_GIT", remote.Bool(!s.cfg.RemoteGit)) +
+		rcbVars(s.cfg.RCB, true) + remote.Vars("RCB_GRANT", s.grant) + remote.SetArgs(claudeArgs) + scripts.Client("client/launch.sh")
+
+	var startErr bytes.Buffer
+	connect := func(first bool) (io.ReadWriteCloser, error) {
+		script := common + scripts.Get("client/dial.sh")
+		var stderr io.Writer = logFile
+		if first {
+			script = common + remote.Vars("LAUNCH_B64", remote.Base64(launch)) + scripts.Client("client/session.sh")
+			stderr = io.MultiWriter(&startErr, logFile)
+		} else {
+			logger.Printf("reconnecting")
+		}
+		var opts []string
+		if !first { // the network may still be half there
+			opts = []string{"-o", "ConnectTimeout=15"}
+		}
+		return startPipe(s.conn.Script(false, opts, script), stderr)
+	}
+
+	// Raw mode carries Ctrl-C to Claude Code; without a terminal, keep it
+	// from killing rcc before it can clean up.
 	signal.Ignore(os.Interrupt)
 	defer signal.Reset(os.Interrupt)
-	s.mu.Lock()
-	if s.stopped {
-		s.mu.Unlock()
-		return 1, errors.New("interrupted")
+	s.conn.Logf("mount=%s", s.remote)
+	code, err := live.Run(live.ClientConfig{
+		Token:    token,
+		Connect:  connect,
+		Files:    func(rw io.ReadWriteCloser) error { return fsserver.Serve(rw, s.remote) },
+		Commands: ag.Serve,
+		Stdin:    os.Stdin,
+		Stdout:   os.Stdout,
+		Stderr:   os.Stderr,
+		Terminal: live.StdTerminal(),
+		Env:      live.LocalEnv(),
+		Hangup:   s.hangup,
+		Logf:     logger.Printf,
+	})
+	var se *live.StartError
+	if errors.As(err, &se) && strings.TrimSpace(startErr.String()) != "" {
+		err = fmt.Errorf("starting the session on the server failed:\n%s", strings.TrimSpace(startErr.String()))
 	}
-	err = run.Start()
-	if err == nil {
-		s.runProc = run.Process
-		procjob.TrackProcess(run.Process.Pid) // TERM lets ssh restore the terminal if rcc dies
-	}
-	s.mu.Unlock()
-	if err != nil {
-		return 1, err
-	}
-	code, err := remote.ExitCode(run.Wait())
-	if err != nil {
-		return 1, err
-	}
-	select {
-	case <-fsExited:
-		if code != 0 && fsErr.Len() > 0 {
-			fmt.Fprintf(os.Stderr, "rcc: file channel output:\n%s\n", strings.TrimSpace(fsErr.String()))
-		}
-	default:
-	}
-	// Teardown: closing sshfs' stdin makes it exit and unmount.
-	fsIn.Close()
-	select {
-	case <-fsExited:
-	case <-time.After(3 * time.Second):
-		fs.Process.Kill()
-	}
-	return code, nil
+	return code, err
 }
 
-func (s *session) openLog() *os.File {
+// startPipe starts an ssh command whose stdio is a connection to the
+// session daemon. Closing it ends that ssh.
+func startPipe(cmd *exec.Cmd, stderr io.Writer) (io.ReadWriteCloser, error) {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	procjob.TrackProcess(cmd.Process.Pid)
+	p := &pipe{Reader: out, in: in, cmd: cmd, done: make(chan struct{})}
+	go func() { cmd.Wait(); close(p.done) }()
+	return p, nil
+}
+
+type pipe struct {
+	io.Reader
+	in   io.WriteCloser
+	cmd  *exec.Cmd
+	done chan struct{}
+	once sync.Once
+}
+
+func (p *pipe) Write(b []byte) (int, error) { return p.in.Write(b) }
+
+func (p *pipe) Close() error {
+	p.once.Do(func() {
+		p.in.Close()
+		select {
+		case <-p.done:
+		case <-time.After(time.Second):
+			p.cmd.Process.Kill()
+		}
+	})
+	return nil
+}
+
+func openLog(logf func(string, ...any)) *os.File {
 	if dir, err := os.UserCacheDir(); err == nil {
 		dir = filepath.Join(dir, "rcc")
 		if os.MkdirAll(dir, 0o700) == nil {
@@ -359,12 +412,12 @@ func (s *session) openLog() *os.File {
 			last := filepath.Join(dir, "last.log")
 			os.Rename(last, filepath.Join(dir, "prev.log"))
 			if f, err := os.Create(last); err == nil {
-				s.conn.Logf("log file: %s", f.Name())
+				logf("log file: %s", f.Name())
 				return f
 			}
 		}
 	}
-	f, _ := os.Create(filepath.Join(s.conn.Tmp(), "log"))
+	f, _ := os.CreateTemp("", "rcc-log-")
 	return f
 }
 
@@ -380,67 +433,68 @@ func (s *session) claudeMissing() error {
 		"     Otherwise install Claude Code there or pass --claude PATH", s.cfg.Dest, s.facts["hostname"])
 }
 
-// firstRead closes ready once the first byte arrives (ssh is authenticated
-// and sshfs is talking).
-type firstRead struct {
-	r     io.Reader
-	ready chan struct{}
-	once  sync.Once
-}
-
-func (f *firstRead) Read(p []byte) (int, error) {
-	n, err := f.r.Read(p)
-	if n > 0 {
-		f.once.Do(func() { close(f.ready) })
-	}
-	return n, err
-}
-
-type rwc struct {
-	io.Reader
-	w io.WriteCloser
-}
-
-func (x rwc) Write(p []byte) (int, error) { return x.w.Write(p) }
-func (x rwc) Close() error                { return x.w.Close() }
-
-// startRCB starts the session; with --rcb it does so through rcbRun.
-func (s *session) startRCB() (int, error) {
+// startRCB runs fn (the session), through rcbRun with --rcb.
+func (s *session) startRCB(fn func(grant string) (int, error)) (int, error) {
 	if s.cfg.RCB == nil {
-		return s.start()
+		return fn("")
 	}
-	return s.rcbRun(func(grant string) (int, error) {
-		s.grant = grant
-		return s.start()
-	})
+	return s.rcbRun(fn)
+}
+
+type grantResult struct {
+	grant string
+	err   error
+}
+
+// firstGrant gets a profile's first grant in the background: without a
+// recorded exit any exit would pass the node check, so it first has the
+// workbench check the exit, and refuses if it cannot.
+func firstGrant(cfg Config) <-chan grantResult {
+	ch := make(chan grantResult, 1)
+	go func() {
+		p := cfg.RCB
+		if p.Exit == nil || p.Exit.IP == "" || p.Exit.TimeZone == "" {
+			fmt.Fprintln(os.Stderr, "rcc: remote-claude-browser has no checked exit for this profile yet; checking it now …")
+			exit, err := rcb.Check(*cfg.RCBLink, p.ID)
+			if err == nil && exit.IP == "" {
+				err = errors.New("no exit address reported")
+			}
+			if err != nil {
+				ch <- grantResult{err: fmt.Errorf("could not check profile %s's exit through node %s (%v); refusing to run without a known exit", p.Label(), p.Node.Name, err)}
+				return
+			}
+			fmt.Fprintf(os.Stderr, "rcc: the profile's exit is %s (%s)\n", exit.IP, exit.TimeZone)
+			p.Exit = &exit
+		}
+		g, err := rcb.Grant(*cfg.RCBLink, p.ID)
+		ch <- grantResult{g, err}
+	}()
+	return ch
 }
 
 // rcbRun runs fn (a session or an account command) as the --rcb profile with
-// a fresh grant. Without a recorded exit any exit would pass the node check,
-// so it has the workbench check the exit first and refuses if it cannot.
-// When the node exits elsewhere than recorded, it has the exit re-checked
-// and runs fn once more with the fresh one.
+// a fresh grant. When the node exits elsewhere than recorded, it has the exit
+// re-checked and runs fn once more with the fresh one.
 func (s *session) rcbRun(fn func(grant string) (int, error)) (int, error) {
 	p := s.cfg.RCB
 	if s.cfg.RCBLink == nil {
 		return 1, errors.New("--rcb needs this machine linked to remote-claude-browser")
 	}
-	if p.Exit == nil || p.Exit.IP == "" || p.Exit.TimeZone == "" {
-		fmt.Fprintln(os.Stderr, "rcc: remote-claude-browser has no checked exit for this profile yet; checking it now …")
-		exit, err := rcb.Check(*s.cfg.RCBLink, p.ID)
-		if err == nil && exit.IP == "" {
-			err = errors.New("no exit address reported")
-		}
-		if err != nil {
-			return 1, fmt.Errorf("could not check profile %s's exit through node %s (%v); refusing to run without a known exit", p.Label(), p.Node.Name, err)
-		}
-		fmt.Fprintf(os.Stderr, "rcc: the profile's exit is %s (%s)\n", exit.IP, exit.TimeZone)
-		p.Exit = &exit
+	first := s.prefetch
+	if first == nil {
+		first = firstGrant(s.cfg)
 	}
+	r := <-first
+	if r.err != nil {
+		return 1, r.err
+	}
+	g := r.grant
 	for attempt := 0; ; attempt++ {
-		g, err := rcb.Grant(*s.cfg.RCBLink, p.ID)
-		if err != nil {
-			return 1, err
+		if attempt > 0 {
+			var err error
+			if g, err = rcb.Grant(*s.cfg.RCBLink, p.ID); err != nil {
+				return 1, err
+			}
 		}
 		code, err := fn(g)
 		if err != nil || code != netexec.ExitMismatch || attempt > 0 {

@@ -7,7 +7,7 @@ echo "home=$HOME"
 echo "hostname=$(hostname)"
 [ -f /etc/ssh/sshd_config.d/remote-cc.conf ] && echo "rccserver=1"
 echo "cfgdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-for b in sshfs unshare nsenter mountpoint fusermount3 fusermount base64 sha256sum; do
+for b in sshfs unshare nsenter mountpoint fusermount3 fusermount base64 sha256sum gzip; do
   p=$(command -v $b 2>/dev/null) && echo "bin_$b=$p"
 done
 [ -e /dev/fuse ] && echo "fuse=1"

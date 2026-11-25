@@ -10,11 +10,15 @@
 
 - `remote-cc help <命令>`（或任何命令后加 `-h`）显示这条命令的全部选项；`remote-cc help` 是按用途分组的总览。
 - 只输入一组命令的名词（`remote-cc server`、`server user`、`account`、`device`、`rcb`）时，列出这一组的子命令。
+- 断线不再结束会话：网络中断后 remote-cc 自动重连（Ctrl-C 放弃），容器里的 Claude Code 不受影响，断线时正在执行的命令和文件读写在重连后接着完成。服务器保留断线的会话 10 分钟。见 [docs/usage.md](docs/usage.md#断线)。
+- 断线在 15 秒内发现（以前约 45 秒），也能发现服务器被冻结、连接却没断开的情况。
 - 文档按读者重新整理（`docs/usage.md`、`deploy/README.md`、`docs/architecture.md`、`CONTRIBUTING.md`），`docs/DESIGN.md` 拆分进 `docs/architecture.md` 和 `docs/records/`；新增文档检查 `go test ./internal/docs`。
 
 ### 变更
 
 - 帮助里区分两种主机：`HOST` 是你的容器（`server setup` 或 `device join` 写好的 ssh 别名），`SERVER` 是 Docker 宿主机（root 或 sudo 账号）。
+- 启动更快：到同一台服务器的 ssh 连接在最后一次使用后保留 10 分钟，之后的会话和 `account`、`device` 命令不用重新握手；会话只用两次 ssh 调用（以前四次，Windows 上每次都要重新连接）；电脑上的检查、`--rcb` 的会话授权和探测同时进行；rcc-shim 压缩后上传。
+- 会话在服务器上由一个守护进程运行（随 rcc-shim 上传，不需要更新服务端镜像）；Claude Code 的终端、文件和命令走同一条 ssh 通道，不再用 `ssh -t` 和 `-R` 反向转发。
 - 每条命令只接受自己的选项。以前被悄悄忽略的选项现在会报错，例如 `server remove --install-docker`、`device list -p 2222`、`version --bogus`。命令行写错时退出码为 2，并打印这条命令的用法。
 
 ### 移除
@@ -37,6 +41,7 @@
 ### 升级步骤
 
 - 把脚本、别名和文档里的旧命令名按上表换成新名字。服务器不需要操作。
+- 本版本和旧版本的 remote-cc 可以同时连同一个容器；旧版本的会话不受影响。
 - 和 RCB 一起升级：RCB 配置卡片上的首次登录提示从下一个 RCB 版本起才是 `account login --rcb`，旧版 RCB 提示的 `login --rcb` 在本版本会报错（报错里会给出新名字）。
 
 ## 0.6.0（2026-11-25）

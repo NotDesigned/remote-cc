@@ -1,27 +1,12 @@
-// Command rcc-shim is the small B-side binary that Claude Code runs via
-// CLAUDE_CODE_SHELL_PREFIX. rcc embeds Linux builds of it and uploads the
-// right one to B automatically.
+// Command rcc-shim is the small server-side binary: Claude Code runs it via
+// CLAUDE_CODE_SHELL_PREFIX, and it runs the session daemon. rcc embeds Linux
+// builds of it and uploads the right one automatically.
 package main
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 
-	"remote-cc/internal/netexec"
-	"remote-cc/internal/shim"
+	"remote-cc/internal/shimcmd"
 )
 
-func main() {
-	if filepath.Base(os.Args[0]) == "git" {
-		os.Exit(shim.Git(os.Args[1:]))
-	}
-	if netexec.Is(os.Args[1:]) {
-		os.Exit(netexec.Main(os.Args[1:]))
-	}
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "rcc-shim: expected exactly one argument (the command string)")
-		os.Exit(126)
-	}
-	os.Exit(shim.Run(os.Args[1]))
-}
+func main() { os.Exit(shimcmd.Main(os.Args)) }

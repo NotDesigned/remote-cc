@@ -20,7 +20,7 @@ for target in $TARGETS; do
     -o "dist/rcc-$os-$arch$ext" ./cmd/rcc
 done
 
-# Binaries embed the Go runtime and BSD-licensed modules; ship their notices.
+# Binaries embed the Go runtime and third-party modules; ship their licences.
 {
   echo "rcc $VERSION bundles the following third-party software."
   echo

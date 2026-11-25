@@ -16,30 +16,41 @@ Claude Code 的工具分两类，所以只替换 shell 不够：
 文件通道把项目目录挂载到容器里**相同的绝对路径**：容器里的 `/home/me/proj/src/a.go` 和电脑上的是同一个文件，Claude 写在命令里的路径和 cwd 在两边都成立，不需要任何路径翻译（Windows 上 Git Bash 形式的 `/c/…` 除外，见下文）。
 
 ```
- 电脑（remote-cc）                               容器（claude、sshfs）
- ┌──────────────────────────┐    ssh 连接     ┌────────────────────────────────────────┐
- │ remote-cc                │ ══════════════► │ sshd                                   │
- │  ├─ 终端透传 ◄───────────┼── 交互会话 ─────┼─► claude（界面显示在电脑的终端上）     │
- │  ├─ SFTP 服务（$P）◄─────┼── 文件会话 ─────┼── sshfs -o slave :$P $P（FUSE）       │
- │  └─ 命令服务 ◄───────────┼── -R socket ────┼── rcc-shim ◄── Bash 工具、git          │
- └──────────────────────────┘                 └────────────────────────────────────────┘
+ 电脑（remote-cc）                    一条 ssh 通道              容器
+ ┌──────────────────────────┐                          ┌──────────────────────────────────────┐
+ │ remote-cc                │                          │ 会话守护进程（rcc-shim __rcc-daemon） │
+ │  可续接字节流 + yamux ═══╪══ ssh … __rcc-dial ══════╪═ 可续接字节流 + yamux                │
+ │  ├─ 终端 ◄───────────────┼── 流 T ─────────────────┼─► 伪终端 ─► claude                   │
+ │  ├─ SFTP 服务（$P）◄─────┼── 流 F ─────────────────┼── sshfs -o slave :$P $P（FUSE）       │
+ │  └─ 命令服务 ◄───────────┼── 每条命令一个流 ───────┼── 命令 socket ◄── rcc-shim ◄── Bash、git │
+ └──────────────────────────┘                          └──────────────────────────────────────┘
           $P = 电脑上项目的绝对路径，容器里也挂在 $P
 ```
 
-- **文件会话**：`sshfs -o slave` 用 stdin/stdout 跑 SFTP 协议，remote-cc 把它接到自己进程内的 SFTP 服务上，所以电脑上不需要 sshd，也不需要 sftp-server（「反向 sshfs」）。SFTP 服务只暴露项目目录（按路径校验，拒绝 `..` 越界），这是防误操作，不是安全边界。
-- **命令服务**：`ssh -R` 把容器里的一个 unix socket 反向转发到电脑上 remote-cc 监听的地址（Linux、macOS 上是私有目录里的 unix socket，Windows 上是 `127.0.0.1` 的 TCP 端口）。连接要带一次性 token，防止电脑上的其他本地用户连进来。
-- Linux 和 macOS 上几次 ssh 调用经 ControlMaster 复用同一条连接；Windows 自带的 OpenSSH 不支持复用，会建立多条连接。
+- **会话守护进程**：每个会话一个，脱离 ssh 会话运行（`setsid`），claude 和 sshfs 都挂在它下面，所以断线不会结束它们。它监听运行目录里的两个 socket：`session.sock` 供 remote-cc 连接（经 `rcc-shim __rcc-dial`，它只把 ssh 的 stdin/stdout 接到这个 socket 上），`s` 供 rcc-shim 发命令。
+- **一条通道上的三种流**：remote-cc 和守护进程之间是一条可续接字节流（`internal/resume`），上面用 yamux 分出多条流：终端（claude 的伪终端，带窗口尺寸和退出码）、文件（sshfs 的 SFTP），以及每条命令一条流。
+- **文件**：`sshfs -o slave` 用 stdin/stdout 跑 SFTP 协议，remote-cc 用自己进程内的 SFTP 服务回答，所以电脑上不需要 sshd，也不需要 sftp-server（「反向 sshfs」）。SFTP 服务只暴露项目目录（按路径校验，拒绝 `..` 越界），这是防误操作，不是安全边界。
+- **命令**：rcc-shim 连到守护进程的命令 socket，守护进程为它开一条流，电脑上的命令服务执行。连接要带这个会话的一次性 token。
+- **ssh 连接复用**：Linux 和 macOS 上，同一个目标的 ssh 调用经 ControlMaster 复用一条连接；这条连接在最后一次使用后保留 10 分钟（`internal/remote` 的 `MasterPersist`），下一次启动或命令不用重新握手。Windows 自带的 OpenSSH 不支持复用，一次会话建立两条连接（探测、会话）。
 
 ## 一次会话
 
-1. **探测**：一次 ssh 调用，收集容器的系统、架构、uid、HOME、所需程序和 claude 的路径，以及已安装 shim 的 sha256。缺什么就给出明确的报错；连到宿主机而不是容器时，报错会指出这一点。
-2. **准备**：清理以前崩溃留下的运行目录；在 umask 077 下创建 `~/.cache/rcc/run/<id>/`，经 stdin 写入 token（不出现在命令行里）；shim 不一致时经 stdin 上传。
-3. **检查电脑的 shell**：在电脑的 shell 里试跑一条命令，失败就停下。
-4. **文件会话**：在容器里启动 sshfs，收到它的第一个字节说明认证完成、sshfs 已经启动。
-5. **交互会话**：`ssh -t` 运行启动脚本，等挂载点和 socket 就绪，设置 `CLAUDE_CODE_SHELL_PREFIX` 等变量，进入项目目录后 `exec claude`。`--` 之后的参数原样交给 claude。
-6. **结束**：claude 退出后关闭 sshfs 的 stdin，挂载随之消失；再卸载、删除运行目录和 socket，关闭 ControlMaster。收到 SIGTERM、SIGHUP 时走同一条路径。
+1. **探测**：一次 ssh 调用，收集容器的系统、架构、uid、HOME、所需程序和 claude 的路径，以及已安装 shim 的 sha256。缺什么就给出明确的报错；连到宿主机而不是容器时，报错会指出这一点。同时在电脑上并行进行：在电脑的 shell 里试跑一条命令（失败就停下），以及 `--rcb` 时向 RCB 取会话授权。
+2. **上传 shim**：只在容器里还没有这个版本时上传，有 gzip 就压缩，容器里校验 sha256。
+3. **启动会话**：一次 ssh 调用运行 `internal/scripts/client/session.sh`：清理以前留下的运行目录，在 umask 077 下创建 `~/.cache/rcc/run/<id>/`，写入启动脚本，启动守护进程，然后在同一个 ssh 通道上连到它。remote-cc 先发 token（守护进程写进运行目录，不出现在命令行里），再同时开文件流和终端流。
+4. **守护进程**：收到文件流就在私有挂载命名空间里启动 sshfs；挂载点就绪后，在伪终端里运行启动脚本（`launch.sh`），它设置 `CLAUDE_CODE_SHELL_PREFIX` 等变量，进入项目目录后 `exec claude`。`--` 之后的参数原样交给 claude。电脑的终端切到 raw 模式，按键和窗口尺寸经终端流传过去，`TERM` 和 locale 变量也一起带过去。
+5. **结束**：claude 退出后，守护进程把退出码发给 remote-cc，等它确认后结束 sshfs，删除运行目录和创建的挂载点父目录。remote-cc 收到 SIGTERM、SIGHUP 时让守护进程给 claude 发 SIGHUP，再走同一条路径。
 
-容器里的脚本统一以 base64 交给 `sh -c` 执行，不依赖登录 shell 是 bash、zsh 还是 fish。shim 按内容寻址存放在 `~/.cache/rcc/shims/<sha256>/`，不同版本的 remote-cc 不会互相覆盖，30 天没用过的版本会被清理（`internal/scripts/client/prepare.sh`）。
+容器里的脚本统一以 base64 交给 `sh -c` 执行，不依赖登录 shell 是 bash、zsh 还是 fish。shim 按内容寻址存放在 `~/.cache/rcc/shims/<sha256>/`，不同版本的 remote-cc 不会互相覆盖，30 天没用过的版本会被清理（`internal/scripts/client/session.sh`）。
+
+## 断线和续接
+
+remote-cc 和守护进程之间的字节流可以换底下的 ssh 连接（`internal/resume`）：
+
+- 两边都保留已经发出、对方还没确认收到的数据。接上新连接时，两边先说自己总共收到了多少字节，各自丢掉对方已有的部分，再补发其余的。每个字节恰好送达一次，顺序不变。所以断线时正在执行的命令、正在进行的文件读写和终端输出，重连后都接着进行；断线期间新发起的命令和按键排队，重连后送达。
+- 两边每 5 秒发一次心跳，15 秒收不到对方的任何数据就判定断线（`resume.Options`），比依赖 TCP 更快，也能发现对方被冻结、连接却没断的情况。ssh 本身用 `ServerAliveInterval=5`、`ServerAliveCountMax=3`。
+- 判定断线后，remote-cc 在终端上提示，按 1、2、4、8、10 秒的间隔重新连接（每次连接最多等 15 秒、握手最多 20 秒），连上后经 `dial.sh` 接回同一个守护进程。按 Ctrl-C 放弃重连。守护进程在重连后把伪终端的尺寸改一下再改回来，让 claude 重画界面。
+- 没有连接时守护进程保留会话 10 分钟（`internal/session` 的 `DefaultGrace`），超时后结束 claude 和 sshfs 并清理。会话已经结束时，`dial.sh` 回答「the session on the server has ended」，remote-cc 不再重试。
 
 ## 命令通道
 
@@ -60,7 +71,7 @@ Claude Code 支持环境变量 `CLAUDE_CODE_SHELL_PREFIX`：设置后，它把�
 ## 文件通道
 
 - sshfs 跑在 `unshare -m` 创建的私有挂载命名空间里，claude 经 `nsenter` 进入同一个命名空间。容器的全局文件系统视图不受影响，同一路径即使已经存在也不会被覆盖。这要求容器里是 root，并有 `unshare`、`nsenter`。
-- 挂载参数见 `internal/scripts/client/mount.sh`：用 `uid`、`gid` 把文件显示为容器当前用户所有；属性缓存 1 秒，「不存在」不缓存（Claude 经 git 在电脑上建好的目录要马上可见），目录缓存 5 秒（一次 READDIR 带回所有条目的属性，关掉会让大目录慢很多）。
+- 挂载参数见 `internal/session/daemon_linux.go`：用 `uid`、`gid` 把文件显示为容器当前用户所有；属性缓存 1 秒，「不存在」不缓存（Claude 经 git 在电脑上建好的目录要马上可见），目录缓存 5 秒（一次 READDIR 带回所有条目的属性，关掉会让大目录慢很多）。
 - SFTP 服务支持 posix-rename、statvfs、hardlink，相对链接的目标原样保存，忽略 chown。
 
 ## Claude 账号和历史档案
@@ -112,7 +123,7 @@ rcc-egress ◄── 每个服务器用户自己的 socket ── rcc-<用户名
 
 - 项目目录里指向目录外的链接，在容器里解析到容器自己的文件系统。
 - 大仓库里 Glob、Grep 经 sshfs 遍历会比较慢。
-- 断线后会话结束，不能在断线后继续。
+- 断线超过 10 分钟，会话结束。电脑上的 remote-cc 自己退出后（比如关掉了终端），不能再接回服务器上仍在运行的会话。
 - claude 在容器里用的是非登录 ssh 会话的环境，只写在 `.bashrc` 里的变量读不到。
 
 ## 决策
@@ -127,6 +138,8 @@ rcc-egress ◄── 每个服务器用户自己的 socket ── rcc-<用户名
 - **默认每台电脑一个 Claude 账号和历史档案**：同一个人换电脑的效果和在新电脑上直接装 Claude Code 一样；需要共用时显式用 `--account`、`--profile`。
 - **镜像由 CI 构建**：本地构建镜像会临时占用大量构建缓存（见 [CONTRIBUTING.md](../CONTRIBUTING.md#镜像)），服务器只拉取镜像。
 - **出网用网络命名空间而不是代理变量**：`HTTPS_PROXY` 拦不住不读它的程序；命名空间里没有别的出口，Mihomo 停止时就是断网。
+- **自己做续接，不用 tmux 或 mosh**：tmux 只能保住终端，命令和文件通道照样断；mosh 要求开放 UDP 端口，也不承载文件和命令。在 ssh 之上加一层可续接字节流，三种流一起保住，也不用多开端口。
+- **会话守护进程放在 rcc-shim 里**：rcc-shim 本来就按版本上传到容器，守护进程跟着它走，不需要改服务端镜像，不同版本的 remote-cc 可以同时连同一个容器。
 - **会话授权而不是节点列表**：出口主机只拿到正在启动的会话要用的节点，被撤销的用户和节点在下一轮复查时停止。
 
 ## 记录

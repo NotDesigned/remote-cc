@@ -22,7 +22,7 @@ import (
 	"remote-cc/internal/procjob"
 	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
-	"remote-cc/internal/shim"
+	"remote-cc/internal/shimcmd"
 	"remote-cc/internal/update"
 )
 
@@ -341,10 +341,8 @@ func Main(args []string, version string) int {
 	}
 	prog := strings.TrimSuffix(filepath.Base(args[0]), ".exe")
 	switch prog {
-	case "rcc-shim":
-		return runShim(args[1:])
-	case "git": // a dev build uploaded as the shim, called through bin/git
-		return shim.Git(args[1:])
+	case "rcc-shim", "git": // a development build uploaded as the shim (bin/git too)
+		return shimcmd.Main(args)
 	}
 	remote.Prog = prog
 	args = args[1:]

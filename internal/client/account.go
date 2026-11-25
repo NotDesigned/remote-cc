@@ -2,8 +2,6 @@ package client
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,25 +207,13 @@ func dash(s string) string {
 }
 
 // installShim puts this rcc's shim on the server (account commands need it
-// for --rcb; sessions install it in prepare) and returns its path.
+// for --rcb) and returns its path.
 func (s *session) installShim() (string, error) {
-	shim, err := s.shimBinary()
+	sha, err := s.ensureShim()
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(shim)
-	sha := hex.EncodeToString(sum[:])
-	cache := s.facts["home"] + "/.cache/rcc"
-	need := !strings.Contains(","+s.facts["shims"], ","+sha+",")
-	c := s.conn.Script(false, nil, remote.Vars("CACHE", cache, "SHIM_SHA", sha, "NEED_SHIM", remote.Bool(need))+scripts.Get("client/shim.sh"))
-	if need {
-		c.Stdin = bytes.NewReader(shim)
-	}
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return "", fmt.Errorf("installing rcc-shim on the server: %w", err)
-	}
-	return cache + "/shims/" + sha + "/rcc-shim", nil
+	return s.facts["home"] + "/.cache/rcc/shims/" + sha + "/rcc-shim", nil
 }
 
 // checkEmail warns when the new login is not the profile's Claude account.

@@ -68,6 +68,25 @@ set -e
 [ "$rc" = 7 ] || fail "exit code $rc, want 7"
 remote-cc account list "$alias"
 
+step "session: a command survives a dropped connection"
+cat > /tmp/fake-claude-slow <<'EOF'
+#!/bin/sh
+# Its command is still running on this machine when the connection drops.
+set -e
+"$CLAUDE_CODE_SHELL_PREFIX" 'sleep 5; echo survived > survived.txt'
+test "$(cat survived.txt)" = survived
+EOF
+sudo docker cp /tmp/fake-claude-slow rcc-owner:/usr/local/bin/fake-claude-slow
+sudo docker exec rcc-owner chmod 755 /usr/local/bin/fake-claude-slow
+rm -f "$proj/survived.txt"
+# The shared ssh connection's process is titled "ssh: <ControlPath> [mux]".
+( sleep 2; pkill -KILL -f '^ssh: .*/rcc/cm/[0-9a-f]+ \[mux\]' ) &
+tty_run "cd '$proj' && remote-cc --claude /usr/local/bin/fake-claude-slow $alias" | tee /tmp/drop.out
+wait
+grep -q "connection lost" /tmp/drop.out || fail "the dropped connection went unnoticed"
+[ "$(cat "$proj/survived.txt")" = survived ] || fail "the command was lost in the reconnect"
+[ "$(sudo docker exec rcc-owner sh -c 'ls /root/.cache/rcc/run | wc -l')" = 0 ] || fail "the session left its run directory"
+
 step "real Claude Code (mock API): Bash tool, cwd, --worktree through local git"
 gwip=$(sudo docker network inspect remote-cc -f '{{(index .IPAM.Config 0).Gateway}}')
 rm -f /tmp/mock-results

@@ -30,7 +30,16 @@ remote-cc -v <服务器>-cc                         # 显示过程；-vv、-vvv�
 - remote-cc 会给 Claude 追加一段说明，告诉它命令在哪台电脑、什么系统上执行，以及项目目录内外的文件分别在哪里。`--no-prompt` 关闭这段说明；你自己传了 `--append-system-prompt-file`，或者 `--` 后第一个参数是 `remote-control`、`mcp` 这类子命令时，remote-cc 不追加。
 - 容器里是 root。remote-cc 默认给 claude 设置 `IS_SANDBOX=1`，所以 `--dangerously-skip-permissions` 可用；`--no-is-sandbox` 关闭。
 - Windows 上命令在 Git for Windows 的 bash 里执行。remote-cc 启动前会先在电脑的 shell 里试跑一条命令，失败就停下并显示原因；可以用环境变量 `RCC_SHELL` 指定 bash 的路径。
-- 会话结束时，remote-cc 在电脑上启动的命令（包括后台命令）都会被结束，容器里的挂载也会卸载。remote-cc 被强行结束（例如 `kill -9`、关闭终端窗口）时同样如此。
+- 会话结束时，remote-cc 在电脑上启动的命令（包括后台命令）都会被结束，容器里的挂载也会卸载。关闭终端窗口时同样如此。remote-cc 被 `kill -9` 时，电脑上的命令立即结束，容器里的 Claude Code 在 10 分钟后结束。
+- 同一台服务器 10 分钟内再次启动（会话或 `account`、`device` 命令）会复用上一次的 ssh 连接，不用重新握手。Windows 上没有这一项。
+
+### 断线
+
+网络中断（换网络、电脑休眠、信号不好）时会话不会结束。remote-cc 在 15 秒内发现断线，在终端上显示 `rcc: connection lost; reconnecting (Ctrl-C ends the session) …`，然后自动重新连接：
+
+- 重连后一切接着进行：容器里的 Claude Code 没有被打断，断线时正在执行的命令照常完成，断线期间输入的内容也会送到。界面会重画一次。
+- 按 Ctrl-C 放弃重连，remote-cc 退出。
+- 10 分钟内没有重连上，容器里的会话结束。这之后可以重新启动，用 `-- --continue` 接着这个目录上次的对话。
 
 ### git
 

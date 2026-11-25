@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -54,21 +56,51 @@ func Open(t Target) (*Conn, error) {
 	procjob.RemoveDirOnExit(tmp)
 	c := &Conn{T: t, tmp: tmp}
 	if runtime.GOOS != "windows" { // Windows OpenSSH has no multiplexing
-		c.ctl = filepath.Join(tmp, "c")
+		c.ctl = controlPath(t)
+		if c.ctl == "" { // no usable shared path: this run's own connection
+			c.ctl = filepath.Join(tmp, "c")
+		}
 	}
 	return c, nil
+}
+
+// MasterPersist is how long the shared ssh connection stays up after its
+// last use, so the next rcc (session or command) skips the ssh handshake.
+const MasterPersist = 10 * time.Minute
+
+// controlPath is the shared connection's socket for t, in a private
+// directory under the user cache. A socket left by a master that died is
+// removed first: ssh would otherwise not multiplex at all.
+func controlPath(t Target) string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	dir = filepath.Join(dir, "rcc", "cm")
+	if os.MkdirAll(dir, 0o700) != nil {
+		return ""
+	}
+	os.Chmod(dir, 0o700)
+	sum := sha256.Sum256([]byte(strings.Join(append([]string{t.SSH, t.Dest}, t.Args...), "\x00")))
+	p := filepath.Join(dir, hex.EncodeToString(sum[:8]))
+	if len(p) > 100 { // unix socket paths are limited to 104-108 bytes
+		return ""
+	}
+	if _, err := os.Stat(p); err == nil {
+		args := append(append([]string{}, t.Args...), "-o", "ControlPath="+p, "-O", "check", t.Dest)
+		if exec.Command(t.SSH, args...).Run() != nil {
+			os.Remove(p)
+		}
+	}
+	return p
 }
 
 // Tmp is a private directory removed by Close.
 func (c *Conn) Tmp() string { return c.tmp }
 
+// Close removes the private temp directory. The shared connection stays up
+// for MasterPersist.
 func (c *Conn) Close() {
-	if c.ctl != "" {
-		if _, err := os.Stat(c.ctl); err == nil {
-			args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "exit", c.T.Dest)
-			exec.Command(c.T.SSH, args...).Run()
-		}
-	}
 	os.RemoveAll(c.tmp)
 }
 
@@ -82,9 +114,12 @@ func (c *Conn) Logf(f string, a ...any) {
 func (c *Conn) args(tty bool, opts []string) []string {
 	args := append([]string{}, c.T.Args...)
 	if c.ctl != "" {
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+c.ctl, "-o", "ControlPersist=30")
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+c.ctl,
+			"-o", fmt.Sprintf("ControlPersist=%d", int(MasterPersist.Seconds())))
 	}
-	args = append(args, "-o", "ServerAliveInterval=15")
+	// A dropped network is noticed within 15s (sessions also have their own
+	// heartbeat, see internal/resume).
+	args = append(args, "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
 	if tty {
 		args = append(args, "-t")
 	} else {
