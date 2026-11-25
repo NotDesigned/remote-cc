@@ -1,6 +1,7 @@
 package rcb
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,5 +81,32 @@ func TestNormalizeURL(t *testing.T) {
 		if _, err := NormalizeURL(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+func TestFindByNumberAndPart(t *testing.T) {
+	ps := []Profile{
+		{ID: "p-9e4b875d68", Name: "Work", Email: "alice@example.com"},
+		{ID: "p-c94214f70d", Name: "Personal", Email: "alice.home@example.com"},
+		{ID: "p-0000000003", Name: "work-old", Email: "old@example.com"},
+	}
+	for sel, want := range map[string]string{
+		"2": "p-c94214f70d", "9e4b": "p-9e4b875d68", "PERSONAL": "p-c94214f70d", "old@": "p-0000000003",
+		"Work": "p-9e4b875d68", // an exact name wins over "work-old" containing it
+	} {
+		p, err := Find(ps, sel)
+		if err != nil || p.ID != want {
+			t.Errorf("%q: %s %v", sel, p.ID, err)
+		}
+	}
+	var amb *AmbiguousError
+	if _, err := Find(ps, "alice"); !errors.As(err, &amb) || len(amb.Candidates) != 2 {
+		t.Errorf("alice: %v", err)
+	}
+	if _, err := Find(ps, "nobody"); err == nil || errors.As(err, &amb) {
+		t.Errorf("nobody: %v", err)
+	}
+	if _, err := Find(ps, "4"); err == nil {
+		t.Error("4 of 3 profiles was accepted")
 	}
 }

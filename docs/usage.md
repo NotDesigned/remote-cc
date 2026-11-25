@@ -121,13 +121,14 @@ Claude Code 本身装在服务器的镜像里，由部署者执行 `remote-cc se
 ```sh
 remote-cc rcb login https://browser.example.com    # 终端显示连接码和链接，你本人在 RCB 里批准这台电脑
 remote-cc rcb profiles                             # 你的浏览器配置：Claude 账号、节点、出口、时区
-cd ~/proj && remote-cc rcb use <配置> <服务器>-cc  # 这个目录及子目录默认用这个配置和服务器
-remote-cc account login --rcb <配置>               # 第一次：在该配置的浏览器里一键登录 Claude
+cd ~/proj && remote-cc rcb use                     # 列出你的配置，选一个；这个目录及子目录默认用它和服务器
+remote-cc account login                            # 第一次：在该配置的浏览器里一键登录 Claude
 remote-cc                                          # 之后在这个目录里直接运行；也可以写 remote-cc --rcb <配置> <服务器>-cc
 ```
 
 - **批准这台电脑**：`rcb login` 显示连接码和链接，并尝试在电脑的浏览器里打开链接。在 RCB 里核对连接码和终端一致、请求是你自己刚发起的，再批准。只批准自己发起的请求：批准别人发来的链接，等于把你的配置和节点交给对方。批准流程和连接码的有效期见 [RCB：批准流程](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#approval)，工作台里的操作见 [RCB：在工作台里批准电脑](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/usage.md#remote-cc)。已经有一个客户端令牌时，可以放进环境变量 `RCC_RCB_TOKEN` 再执行 `rcb login`，跳过批准。
-- **选配置**：`--rcb` 接受配置的 id、Claude 邮箱或名称，名称重复时让你选。`rcb use <配置> [<服务器>-cc]` 把配置和服务器记在当前目录上；之后在这个目录和子目录里，直接运行 `remote-cc`（或 `remote-cc -- --continue` 等）就以这个配置启动会话，`account login --rcb`、`account status --rcb` 等也可以省略服务器。没有用 `rcb use` 时，只有电脑只加入了一台服务器才能省略服务器。
+- **选配置**：`--rcb` 和 `rcb use` 接受 `rcb profiles` 里的序号（如 `--rcb 2`）、配置的 id、Claude 邮箱或名称，也接受其中任意一段，只要只有一个配置含有它（如 `--rcb sola`）；有几个配置都含有时让你选。`rcb use` 不写配置时列出全部配置让你选。
+- **记在目录上**：`rcb use [<配置> [<服务器>-cc]]` 把配置和服务器记在当前目录上；之后在这个目录和子目录里，直接运行 `remote-cc`（或 `remote-cc -- --continue` 等）就以这个配置启动会话，`account login`、`account status` 等也不用写 `--rcb` 和服务器。没有用 `rcb use` 时，只有电脑只加入了一台服务器才能省略服务器。
 - **Claude 账号**：每个配置在容器里有固定的 Claude 账号 `rcb-<配置 id>`，凭据跟着配置走，几台电脑共用同一份登录。这些账号只能通过 `--rcb` 使用：`--account rcb-…` 和 `RCC_ACCOUNT` 都选不中它们，`--rcb` 和不同的 `--account` 同时给出时报错。`account status`、`account logout`、`account setup-token` 加 `--rcb` 时同样经节点运行，`account token --rcb <配置>` 保存长期令牌。
 - **启动时要能连上 RCB**：每次启动会话，remote-cc 都向 RCB 要一份会话授权（见 [RCB：会话授权](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#grants)）。连不上 RCB 时新会话启动失败，已经在运行的会话不受影响。
 - **断开**：在 RCB 的工作台里断开这台电脑（见 [RCB：撤销](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#revocation)）。`remote-cc rcb logout` 只删除电脑上保存的连接，不会让它失效。

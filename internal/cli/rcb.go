@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -57,7 +58,13 @@ func runRCBUse(in *invocation) int {
 	if err != nil {
 		return fail(err)
 	}
-	p, err := chooseProfile(ps, in.pos[0])
+	var p rcb.Profile
+	if len(in.pos) == 0 {
+		fmt.Fprintln(os.Stderr, "your profiles:")
+		p, err = pickProfile(ps)
+	} else {
+		p, err = chooseProfile(ps, in.pos[0])
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -89,8 +96,8 @@ func runRCBProfiles(*invocation) int {
 		return fail(err)
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tCLAUDE ACCOUNT\tNODE\tEXIT\tTIME ZONE")
-	for _, p := range ps {
+	fmt.Fprintln(tw, "#\tID\tNAME\tCLAUDE ACCOUNT\tNODE\tEXIT\tTIME ZONE")
+	for i, p := range ps {
 		node, ip, tz := "-", "-", "-"
 		if p.Node != nil {
 			node = p.Node.Name
@@ -105,7 +112,7 @@ func runRCBProfiles(*invocation) int {
 		case email == "":
 			email = "-"
 		}
-		fmt.Fprintln(tw, strings.Join([]string{p.ID, p.Name, email, node, ip, tz}, "\t"))
+		fmt.Fprintln(tw, strings.Join([]string{strconv.Itoa(i + 1), p.ID, p.Name, email, node, ip, tz}, "\t"))
 	}
 	tw.Flush()
 	return 0

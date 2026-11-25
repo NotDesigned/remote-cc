@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,8 +170,10 @@ func Profiles(l Link) ([]Profile, error) {
 	return v.Profiles, nil
 }
 
-// Find picks one profile by id, Claude email or name (case-insensitive for
-// email and name); an ambiguous or unknown selector lists the candidates.
+// Find picks one profile: by id, Claude email or name (case-insensitive for
+// email and name), by its number in `rcb profiles` (from 1), or by any part
+// of its id, name or email that no other profile has. An ambiguous or
+// unknown selector lists the candidates.
 func Find(ps []Profile, sel string) (Profile, error) {
 	sel = strings.TrimSpace(sel)
 	for _, p := range ps {
@@ -200,17 +203,38 @@ func Find(ps []Profile, sel string) (Profile, error) {
 			return Profile{}, &AmbiguousError{Sel: sel, Candidates: m}
 		}
 	}
+	// The number `rcb profiles` shows.
+	if n, err := strconv.Atoi(sel); err == nil && n >= 1 && n <= len(ps) {
+		return ps[n-1], nil
+	}
+	// Any part of the ID, name or email, if only one profile has it.
+	if sel != "" {
+		var m []Profile
+		low := strings.ToLower(sel)
+		for _, p := range ps {
+			if strings.Contains(strings.ToLower(p.ID+"\x00"+p.Name+"\x00"+p.Email), low) {
+				m = append(m, p)
+			}
+		}
+		switch len(m) {
+		case 1:
+			return m[0], nil
+		case 0:
+		default:
+			return Profile{}, &AmbiguousError{Sel: sel, Candidates: m}
+		}
+	}
 	return Profile{}, fmt.Errorf("no profile %q; yours are:\n%s", sel, list(ps))
 }
 
 func list(ps []Profile) string {
 	var b strings.Builder
-	for _, p := range ps {
+	for i, p := range ps {
 		node := "no node"
 		if p.Node != nil {
 			node = p.Node.Name
 		}
-		fmt.Fprintf(&b, "  %s  %s  [%s]\n", p.ID, p.Label(), node)
+		fmt.Fprintf(&b, "  %d) %s  %s  [%s]\n", i+1, p.ID, p.Label(), node)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

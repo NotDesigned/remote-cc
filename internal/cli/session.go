@@ -47,9 +47,10 @@ func account(in *invocation, action string) int {
 	c := client.Config{Account: in.s("--account"), ClaudePath: in.s("--claude")}
 	sel, pos := in.s("--rcb"), in.pos
 	if len(pos) == 0 {
-		if sel == "" {
-			return usageError(in.cmd, errors.New("HOST missing (it may be left out only with --rcb)"))
+		if sel == "" && c.Account != "" {
+			return usageError(in.cmd, errors.New("HOST missing"))
 		}
+		// With --rcb, or in a directory set up with rcb use: the remembered server.
 		var host string
 		var err error
 		if sel, host, err = rcbDefaults(sel); err != nil {
@@ -134,6 +135,15 @@ func chooseProfile(ps []rcb.Profile, sel string) (rcb.Profile, error) {
 		return p, err
 	}
 	fmt.Fprintf(os.Stderr, "%q fits several profiles:\n", sel)
+	return pickProfile(amb.Candidates)
+}
+
+// pickProfile asks which of ps to use (a terminal is needed).
+func pickProfile(ps []rcb.Profile) (rcb.Profile, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return rcb.Profile{}, errors.New("which profile? name one (see: rcb profiles)")
+	}
+	amb := &rcb.AmbiguousError{Candidates: ps}
 	for i, c := range amb.Candidates {
 		node := "no node"
 		if c.Node != nil {

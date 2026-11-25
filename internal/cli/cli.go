@@ -187,6 +187,8 @@ const (
 	// serverHelp: what server and user commands connect to.
 	serverHelp = "SERVER is the Docker host itself, over ssh as root or a sudo user (e.g. root@myserver).\n" +
 		"server options: --install-dir DIR --data DIR --image IMG --public-host NAME --name INSTANCE"
+	profileHelp = "\nPROFILE: its number in rcb profiles, its ID, name or Claude email, or any part of them\n" +
+		"that only one profile has."
 	sshHelp = "ssh options: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER -4 -6 -A -C -q;\n" +
 		"-v, -vv, -vvv, -vvvv: verbose; extra v's make ssh verbose too"
 )
@@ -203,7 +205,8 @@ func commandTable() []*command {
 	)
 	srvOpts := []string{"--install-dir", "--data", "--image", "--public-host", "--name"}
 	srv := func(own ...string) []string { return append(own, srvOpts...) }
-	const rcbHost = "\nWith --rcb, HOST may be left out: the server set for this directory (rcb use), or the only one."
+	const rcbHost = "\nHOST may be left out with --rcb (the server set for this directory, or the only one), or in a\n" +
+		"directory set up with rcb use (its profile and server)." + profileHelp
 	account := func(action, args, summary string, flags ...string) *command {
 		return &command{name: "account " + action, args: args, group: gLocal, ssh: true,
 			summary: summary, help: hostHelp + rcbHost + "\n--claude PATH: claude in the container.\n" + sshHelp,
@@ -224,7 +227,7 @@ options:
                          in the container instead of here
 Arguments after -- go to claude.
 With no HOST, the profile and server set for this directory (rcb use) apply.
-` + sshHelp,
+` + strings.TrimPrefix(profileHelp, "\n") + "\n" + sshHelp,
 			flags: []string{"--claude", "--profile", "--account", "--rcb", "--no-prompt", "--no-is-sandbox", "--remote-git"},
 			nargs: [2]int{0, 2}, run: runSession},
 
@@ -253,8 +256,8 @@ With no HOST, the profile and server set for this directory (rcb use) apply.
 		{name: "rcb login", args: "URL", group: gRCB, summary: "link this machine (approve it in the workbench)",
 			nargs: [2]int{1, 1}, run: runRCBLogin},
 		{name: "rcb profiles", group: gRCB, summary: "your browser profiles", nargs: [2]int{0, 0}, run: runRCBProfiles},
-		{name: "rcb use", args: "PROFILE [HOST]", group: gRCB, summary: "remember for this directory; then just: rcc",
-			help: hostHelp, nargs: [2]int{1, 2}, run: runRCBUse},
+		{name: "rcb use", args: "[PROFILE [HOST]]", group: gRCB, summary: "remember for this directory; then just: rcc",
+			help: hostHelp + profileHelp + "\nWithout PROFILE, rcc lists your profiles and asks.", nargs: [2]int{0, 2}, run: runRCBUse},
 		{name: "rcb logout", group: gRCB, summary: "forget the link", nargs: [2]int{0, 0}, run: runRCBLogout},
 
 		{name: "server setup", group: gServer, ssh: true,
