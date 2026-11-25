@@ -23,6 +23,17 @@ var (
 	err   error
 )
 
+// A process started as `<exe> __rcc_guard` is a guard whatever the
+// executable is. killOnExit starts os.Executable(), which in tests is the
+// test binary: without this it would run the tests again, which start
+// another guard, and so on.
+func init() {
+	if len(os.Args) == 2 && os.Args[1] == GuardArg {
+		RunGuard()
+		os.Exit(0)
+	}
+}
+
 func killOnExit() error {
 	once.Do(func() {
 		exe, e := os.Executable()
