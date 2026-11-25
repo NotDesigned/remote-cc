@@ -13,6 +13,8 @@
 - **容器**（命令里写作 `HOST`）：`server setup` 或 `device join` 在你电脑上写好的 ssh 别名，经服务器的网关进入你自己的容器。别名默认是服务器主机名的第一段加 `-cc`，下文写作 `<服务器>-cc`。会话、`account …`、`device …` 都用它。
 - **宿主机**（命令里写作 `SERVER`）：服务器本身，以 root 或有 sudo 的账号连接，例如 `root@<服务器>`。只有 `server …` 管理命令用它，见 [deploy/README.md](../deploy/README.md)。
 
+`remote-cc host list` 列出这台电脑上的所有容器别名，以及各自的服务器地址和服务器用户；当前目录用 `rcb use` 记住了哪一个，也会标出来。
+
 ## 会话
 
 ```sh

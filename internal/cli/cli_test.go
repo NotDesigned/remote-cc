@@ -75,7 +75,7 @@ func TestServeQuiet(t *testing.T) {
 
 func TestLookup(t *testing.T) {
 	for args, want := range map[string]string{
-		"server user add root@h alice": "server user add", "device join inv": "device join", "server update --all": "server update", "server list": "server list",
+		"server user add root@h alice": "server user add", "device join inv": "device join", "host list": "host list", "server update --all": "server update", "server list": "server list",
 		"account login cc": "account login", "account list cc": "account list", "rcb use p": "rcb use", "server egress h": "server egress",
 	} {
 		c, name, _, _ := lookup(strings.Fields(args))

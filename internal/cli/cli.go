@@ -228,6 +228,8 @@ With no HOST, the profile and server set for this directory (rcb use) apply.
 			flags: []string{"--claude", "--profile", "--account", "--rcb", "--no-prompt", "--no-is-sandbox", "--remote-git"},
 			nargs: [2]int{0, 2}, run: runSession},
 
+		{name: "host list", group: gLocal, summary: "the HOSTs on this computer (server setup and device join add them)",
+			help: hostHelp, nargs: [2]int{0, 0}, run: runHostList},
 		account("login", acctArgs, "sign in to Claude, for one account"),
 		account("logout", acctArgs, "sign out"),
 		account("status", acctArgs, "the account's login state"),

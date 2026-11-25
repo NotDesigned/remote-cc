@@ -5,7 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"remote-cc/internal/sshconf"
 )
 
 // Use is what `rcb use` remembers for a project directory.
@@ -77,23 +78,5 @@ func Lookup(dir string) (Use, string, bool) {
 	}
 }
 
-// Servers lists the remote-cc server aliases this machine has (device join or
-// server setup write them to ~/.ssh/remote-cc/config), without gateways.
-func Servers() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	b, err := os.ReadFile(filepath.Join(home, ".ssh", "remote-cc", "config"))
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 && strings.EqualFold(f[0], "Host") && !strings.HasSuffix(f[1], "-gw") && !strings.ContainsAny(f[1], "*?") {
-			out = append(out, f[1])
-		}
-	}
-	return out
-}
+// Servers lists the HOSTs this machine has (see sshconf.Aliases).
+func Servers() []string { return sshconf.Aliases() }

@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"remote-cc/internal/agent"
 	"remote-cc/internal/client"
+	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
 	"remote-cc/internal/shim"
 	"remote-cc/internal/sshconf"
@@ -24,6 +26,41 @@ func runJoin(in *invocation) int {
 	}
 	fmt.Printf("\nDone: this machine can now reach %s as %q.\n  %s account login %s     # sign in to Claude (once per machine)\n  %s %s           # in a project directory\n",
 		s.Host, s.Alias, remote.Prog, s.Alias, remote.Prog, s.Alias)
+	return 0
+}
+
+// runHostList: remote-cc host list.
+func runHostList(*invocation) int {
+	hosts := sshconf.Hosts()
+	if len(hosts) == 0 {
+		fmt.Printf("no HOSTs on this computer yet: %[1]s server setup SERVER, or %[1]s device join INVITE\n", remote.Prog)
+		return 0
+	}
+	cwd, _ := os.Getwd()
+	use, dir, here := rcb.Lookup(cwd)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "HOST\tSERVER\tUSER\t")
+	for _, h := range hosts {
+		server, user := "?", h.User
+		if h.Host != "" {
+			server = h.Host
+			if h.Port != 22 {
+				server = fmt.Sprintf("%s:%d", h.Host, h.Port)
+			}
+			if h.Jump != "" {
+				server += " (via " + h.Jump + ")"
+			}
+		}
+		if user == "" {
+			user = "?"
+		}
+		note := ""
+		if here && use.Server == h.Alias {
+			note = "default in " + dir + " (rcb use)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.Alias, server, user, note)
+	}
+	tw.Flush()
 	return 0
 }
 

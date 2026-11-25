@@ -212,6 +212,42 @@ Host %[1]s
 	return ensureInclude(filepath.Join(sshDir, "config"))
 }
 
+// Aliases lists the HOSTs configured on this machine (server setup and
+// device join write them to ~/.ssh/remote-cc/config), in file order,
+// without their gateways.
+func Aliases() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".ssh", "remote-cc", "config"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && strings.EqualFold(f[0], "Host") && !strings.HasSuffix(f[1], "-gw") && !strings.ContainsAny(f[1], "*?") {
+			out = append(out, f[1])
+		}
+	}
+	return out
+}
+
+// Hosts reads back every configured HOST. An entry that cannot be read
+// (edited by hand) comes back with only its Alias.
+func Hosts() []Server {
+	var out []Server
+	for _, a := range Aliases() {
+		s, err := Lookup(a)
+		if err != nil {
+			s = Server{Alias: a}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // Lookup reads back the Server written by Configure for alias.
 func Lookup(alias string) (Server, error) {
 	_, d, err := dirs()
