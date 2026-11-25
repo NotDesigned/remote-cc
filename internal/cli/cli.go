@@ -524,6 +524,19 @@ func runHelp(in *invocation) int {
 	return 0
 }
 
+// CommandNames is every command's name ("server user add", "help", …), for
+// checks that compare the documentation with the command table.
+func CommandNames() []string {
+	var ns []string
+	for _, c := range commands {
+		if c.name != "" {
+			ns = append(ns, c.name)
+		}
+	}
+	sort.Strings(ns)
+	return ns
+}
+
 func commandNames() []string {
 	var ns []string
 	for _, c := range commands {
