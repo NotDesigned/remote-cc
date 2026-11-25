@@ -77,8 +77,8 @@ func Lookup(dir string) (Use, string, bool) {
 	}
 }
 
-// Servers lists the remote-cc server aliases this machine has (join or
-// setup-server write them to ~/.ssh/remote-cc/config), without gateways.
+// Servers lists the remote-cc server aliases this machine has (device join or
+// server setup write them to ~/.ssh/remote-cc/config), without gateways.
 func Servers() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {

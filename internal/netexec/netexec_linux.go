@@ -140,7 +140,7 @@ func AccountEmail(out []byte) (loggedIn bool, email string) {
 func CheckAccount(loggedIn bool, got, want string) (warning string, err error) {
 	switch {
 	case !loggedIn:
-		return "", fmt.Errorf("this Claude account is not logged in yet; log in as %s first (login --rcb)", want)
+		return "", fmt.Errorf("this Claude account is not logged in yet; log in as %s first (account login --rcb)", want)
 	case got == "":
 		return fmt.Sprintf("Claude Code reports no account email (a stored token?); not checked against the profile's %s", want), nil
 	case !strings.EqualFold(got, want):

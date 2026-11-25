@@ -147,5 +147,5 @@ func PrintInvite(iv Invite, who, prog string) {
 	fmt.Fprintf(os.Stderr, "\nOne-time invite for %s on %s (valid until %s server time). Send it privately:\n"+
 		"whoever holds it can add one device for %s until it is used or expires.\n\n", who, iv.Host, iv.Expires, iv.User)
 	fmt.Println(iv.Encode())
-	fmt.Fprintf(os.Stderr, "\nOn the new machine (after installing remote-cc):\n  %s join <invite>\n", prog)
+	fmt.Fprintf(os.Stderr, "\nOn the new machine (after installing remote-cc):\n  %s device join <invite>\n", prog)
 }

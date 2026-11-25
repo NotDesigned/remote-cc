@@ -79,7 +79,7 @@ func (c *Config) addParams(user string, keys []string) string {
 
 // Setup installs (or refreshes) a server with the caller as its first user:
 // gateway, user, a key for that server on this machine, the ssh config entry
-// and pinned host keys — init + user add + join in one step.
+// and pinned host keys — init + server user add + device join in one step.
 func Setup(c Config, user, alias string, extraKeys []string) error {
 	if user == "" {
 		user = "owner"
@@ -119,7 +119,7 @@ func Setup(c Config, user, alias string, extraKeys []string) error {
 		s.Jump = c.Dest
 		if !loopback(c.Bind) {
 			fmt.Fprintf(os.Stderr, "rcc: port %d on %s is not reachable from here (cloud firewall?); going through %s.\n"+
-				"     Open TCP %d to connect directly, then run setup-server again.\n", port, host, c.Dest, port)
+				"     Open TCP %d to connect directly, then run server setup again.\n", port, host, c.Dest, port)
 		}
 		if len(c.Args) > 0 {
 			fmt.Fprintf(os.Stderr, "rcc: note: ProxyJump uses %q as written; put the ssh options you passed into a Host entry for it.\n", c.Dest)
@@ -133,9 +133,9 @@ func Setup(c Config, user, alias string, extraKeys []string) error {
 	}
 	fmt.Printf(`
 remote-cc is ready on %[1]s: you are user %[2]s, reachable as "%[3]s" (ssh config in ~/.ssh/remote-cc/config).
-  %[4]s login %[3]s          # sign in to Claude (once)
+  %[4]s account login %[3]s  # sign in to Claude (once)
   %[4]s %[3]s                # in a project directory
-  %[4]s user add %[5]s <name>   # add people (prints a one-time invite)
+  %[4]s server user add %[5]s <name>   # add people (prints a one-time invite)
 `, host, user, alias, remote.Prog, c.Dest)
 	return nil
 }
@@ -152,7 +152,7 @@ func Init(c Config) error {
 		return fmt.Errorf("server init failed: %w", err)
 	}
 	remember(c)
-	fmt.Printf("gateway is running on port %s, host key %s\nadd users with:  %s user add %s <name>\n",
+	fmt.Printf("gateway is running on port %s, host key %s\nadd users with:  %s server user add %s <name>\n",
 		f["port"], sshconf.Fingerprint(f["gwkey"]), remote.Prog, c.Dest)
 	return nil
 }
@@ -182,7 +182,7 @@ func UserAdd(c Config, name string, keyFiles []string, alias string) error {
 	defer conn.Close()
 	f, err := conn.Elevated(c.addParams(name, keys), scripts.Host("server/user-add.sh"))
 	if err != nil {
-		return fmt.Errorf("user add failed: %w", err)
+		return fmt.Errorf("server user add failed: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "rcc: user %s is ready (container rcc-%s, %s key(s))\n", name, name, f["keys"])
 	if len(keys) == 0 {
@@ -258,7 +258,7 @@ func printConfig(c Config, name, alias string, f map[string]string) {
 	}
 	uk := fmt.Sprintf("rcc-%s@%s", name, host)
 	fmt.Printf(`
-Simplest for %[1]s: an invite (%[9]s user invite %[10]s %[1]s), then "%[9]s join <invite>".
+Simplest for %[1]s: an invite (%[9]s server user invite %[10]s %[1]s), then "%[9]s device join <invite>".
 Or by hand, with the private key whose public key was authorized — ~/.ssh/config:
 
   Host %[2]s-gw
@@ -303,7 +303,7 @@ func UserList(c Config) error {
 	}
 	tw.Flush()
 	if n == 0 {
-		fmt.Printf("no users yet: %s user add %s <name>\n", remote.Prog, c.Dest)
+		fmt.Printf("no users yet: %s server user add %s <name>\n", remote.Prog, c.Dest)
 	}
 	return nil
 }
@@ -320,7 +320,7 @@ func UserRemove(c Config, name string, purge, force bool) error {
 	defer conn.Close()
 	if _, err := conn.Elevated(remote.Vars("DIR", c.InstallDir, "NAME", name, "PURGE", remote.Bool(purge), "FORCE", remote.Bool(force)),
 		scripts.Host("server/user-remove.sh")); err != nil {
-		return fmt.Errorf("user remove failed: %w", err)
+		return fmt.Errorf("server user remove failed: %w", err)
 	}
 	fmt.Printf("user %s removed (access revoked)\n", name)
 	return nil
@@ -478,7 +478,7 @@ func Egress(c Config, rcbURL, image string) error {
 		fmt.Printf("attached to it: %s\n", a)
 	}
 	if b := strings.TrimSpace(f["busy"]); b != "" {
-		fmt.Printf("still to attach (sessions running): %s\n  when they end, run: %s update-server %s\n", b, remote.Prog, c.Dest)
+		fmt.Printf("still to attach (sessions running): %s\n  when they end, run: %s server update %s\n", b, remote.Prog, c.Dest)
 	}
 	return nil
 }

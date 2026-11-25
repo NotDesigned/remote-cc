@@ -2,7 +2,7 @@
 # Admin invite: authorizes the one-time key PUB for NAME, in two halves.
 : "${DIR:?}" "${NAME:?}" "${PUB:?}" "${ID:?}" "${TTL:?}"
 load_server
-[ -f "$DIR/users/$NAME/.env" ] || { echo "rcc: no user $NAME (create it with 'user add')" >&2; exit 3; }
+[ -f "$DIR/users/$NAME/.env" ] || { echo "rcc: no user $NAME (create it with 'server user add')" >&2; exit 3; }
 k="$DATA/keys/$NAME/authorized_keys"; inv="$DATA/invites/$NAME"
 touch "$inv"; chmod 644 "$inv"
 prune_expired "$k"; prune_expired "$inv"

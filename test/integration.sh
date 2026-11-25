@@ -47,8 +47,8 @@ exit "$code"
 EOF
 chmod 755 /tmp/fake-claude
 
-step "setup-server (through sudo)"
-remote-cc setup-server --image "$IMAGE" --user owner "$ADMIN"
+step "server setup (through sudo)"
+remote-cc server setup --image "$IMAGE" --user owner "$ADMIN"
 alias=localhost-cc
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "alias does not reach rcc-owner"
 grep -q "Include remote-cc/config" ~/.ssh/config || fail "no Include in ~/.ssh/config"
@@ -66,7 +66,7 @@ tty_run "cd '$proj' && remote-cc --claude /usr/local/bin/fake-claude $alias -- e
 rc=$?
 set -e
 [ "$rc" = 7 ] || fail "exit code $rc, want 7"
-remote-cc accounts "$alias"
+remote-cc account list "$alias"
 
 step "real Claude Code (mock API): Bash tool, cwd, --worktree through local git"
 gwip=$(sudo docker network inspect remote-cc -f '{{(index .IPAM.Config 0).Gateway}}')
@@ -93,12 +93,12 @@ case "$r3" in *"$wt/sub"*) ;; *) fail "cwd not kept between commands: $r3" ;; es
 git -C "$repo" worktree list | grep -q "$wt" || fail "worktree not created on this machine"
 grep -q "cmd=git " ~/.cache/rcc/last.log || fail "Claude Code's git calls did not run here"
 
-step "user add: invite, join on another machine"
-inv=$(remote-cc user add "$ADMIN" alice | grep '^rcc1\.')
-as alice remote-cc join "$inv"
+step "server user add: invite, device join on another machine"
+inv=$(remote-cc server user add "$ADMIN" alice | grep '^rcc1\.')
+as alice remote-cc device join "$inv"
 [ "$(as alice ssh -o BatchMode=yes "$alias" hostname)" = rcc-alice ] || fail "alice"
-expect_fail as mallory remote-cc join "$inv"
-remote-cc user list "$ADMIN" | grep -q alice || fail "user list"
+expect_fail as mallory remote-cc device join "$inv"
+remote-cc server user list "$ADMIN" | grep -q alice || fail "server user list"
 
 step "isolation"
 expect_fail as alice ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -110,9 +110,9 @@ as alice ssh -o BatchMode=yes "$alias-gw" hostkey | grep -q '^ssh-ed25519 ' || f
 step "self-service devices"
 dinv=$(as alice remote-cc device invite --ttl 2h "$alias" | grep '^rcc1\.')
 as alice remote-cc device list "$alias" | tee /tmp/devs | grep -qi invite || fail "pending invite not listed"
-as alice2 remote-cc join "$dinv"
+as alice2 remote-cc device join "$dinv"
 [ "$(as alice2 ssh -o BatchMode=yes "$alias" hostname)" = rcc-alice ] || fail "alice2"
-expect_fail as mallory remote-cc join "$dinv"
+expect_fail as mallory remote-cc device join "$dinv"
 fp=$(as alice2 ssh-keygen -lf ".ssh/remote-cc/${alias}_ed25519" | awk '{print $2}')
 as alice remote-cc device list "$alias" | grep -qF "$fp" || fail "device not listed"
 as alice remote-cc device remove "$alias" "$fp"
@@ -122,22 +122,22 @@ expect_fail as alice2 ssh -o BatchMode=yes "$alias" true
 for _ in 1 2 3 4 5; do as alice remote-cc device invite "$alias" >/dev/null 2>&1 || true; done
 expect_fail as alice remote-cc device invite "$alias"
 
-step "user config / remove"
-remote-cc user config "$ADMIN" alice >/dev/null
-remote-cc user remove --purge "$ADMIN" alice
+step "server user config / remove"
+remote-cc server user config "$ADMIN" alice >/dev/null
+remote-cc server user remove --purge "$ADMIN" alice
 expect_fail as alice ssh -o BatchMode=yes "$alias" true
 expect_fail sudo docker inspect rcc-alice >/dev/null 2>&1
 
-step "a stopped container: clear error, update-server starts it"
+step "a stopped container: clear error, server update starts it"
 sudo docker stop rcc-owner >/dev/null
 if out=$(cd "$proj" && remote-cc --claude /usr/local/bin/fake-claude "$alias" 2>&1); then fail "connected to a stopped container"; fi
 case "$out" in *"could not reach your container"*) ;; *) fail "no hint for a stopped container: $out" ;; esac
-remote-cc update-server --image "$IMAGE" "$ADMIN" | tee /tmp/upd
-grep -q "started stopped container(s): rcc-owner" /tmp/upd || fail "update-server did not start rcc-owner"
+remote-cc server update --image "$IMAGE" "$ADMIN" | tee /tmp/upd
+grep -q "started stopped container(s): rcc-owner" /tmp/upd || fail "server update did not start rcc-owner"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after start"
 
-step "update-server"
-remote-cc update-server --image "$IMAGE" "$ADMIN"
+step "server update"
+remote-cc server update --image "$IMAGE" "$ADMIN"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update"
 
 step "server migrate: a 0.4 single-container deployment"
@@ -177,18 +177,18 @@ remote-cc server migrate --install-dir "$sdir" --name rccs --user bob --image "$
 # Same host key (StrictHostKeyChecking would refuse a changed one), same data.
 [ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated data"
 
-step "update-server --all (the main and the migrated server)"
-remote-cc servers | tee /tmp/servers
-[ "$(grep -c "$ADMIN" /tmp/servers)" = 2 ] || fail "servers should list both installs"
-remote-cc update-server --all --image "$IMAGE"
+step "server update --all (the main and the migrated server)"
+remote-cc server list | tee /tmp/servers
+[ "$(grep -c "$ADMIN" /tmp/servers)" = 2 ] || fail "server list should list both installs"
+remote-cc server update --all --image "$IMAGE"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update --all"
 [ "$(ssh -F ~/.ssh/single.conf single cat /root/marker)" = kept ] || fail "migrated server after update --all"
-remote-cc remove-server --purge --install-dir "$sdir" "$ADMIN"
+remote-cc server remove --purge --install-dir "$sdir" "$ADMIN"
 
-step "remove-server (it removes the image too, so it comes last)"
-remote-cc remove-server --purge "$ADMIN"
+step "server remove (it removes the image too, so it comes last)"
+remote-cc server remove --purge "$ADMIN"
 expect_fail sudo docker inspect remote-cc-gateway >/dev/null 2>&1
 expect_fail sudo docker inspect rcc-owner >/dev/null 2>&1
-remote-cc servers | grep -q "no servers" || fail "remove-server should forget the server"
+remote-cc server list | grep -q "no servers" || fail "server remove should forget the server"
 
 step "all passed"

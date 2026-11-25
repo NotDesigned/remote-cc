@@ -1,77 +1,337 @@
 // Package cli is rcc's command line.
+//
+// Every command is one entry in the table built by commandTable: its name,
+// synopsis, the options it takes, how many positional arguments, and the
+// function that runs it. Dispatch, option parsing, per-command usage and the
+// help listing all come from that table, so a command is added (or changed)
+// in one place. The command files are grouped by audience: session.go (a
+// Claude Code session and its accounts), local.go (this machine: devices,
+// device, update), rcb.go (remote-claude-browser), server.go (admin).
 package cli
 
 import (
 	"errors"
 	"fmt"
-	"log"
-	"net"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
+	"regexp"
+	"sort"
 	"strings"
-	"text/tabwriter"
-	"time"
 
-	"golang.org/x/term"
-
-	"remote-cc/internal/agent"
-	"remote-cc/internal/client"
 	"remote-cc/internal/procjob"
 	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
-	"remote-cc/internal/server"
 	"remote-cc/internal/shim"
-	"remote-cc/internal/sshconf"
 	"remote-cc/internal/update"
 )
 
-const usageText = `usage:
-  rcc [options] HOST [DIR] [-- CLAUDE-ARGS...]     Claude Code on HOST, working on DIR here
-      -v, -vv, -vvv, -vvvv   verbose; extra v's make ssh verbose too
-      --account NAME         Claude login: default this machine's own; "default" = shared
-      --profile NAME         history: default this machine's own; "none" = the account's
-      --rcb PROFILE          run as a remote-claude-browser profile: its Claude account,
-                             all traffic through its proxy node (needs rcb login, server egress)
-      --claude PATH  --no-prompt  --no-is-sandbox
-      --remote-git           Claude Code's own git calls (status, --worktree, …) run
-                             on the server instead of here
-      ssh options: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER -4 -6 -A -C -q
+// command is one entry of the command table.
+type command struct {
+	name    string // "server user add"; "" is the session
+	args    string // synopsis after the name
+	summary string
+	group   string   // heading in the help listing; "" = hidden
+	help    string   // extra text for `rcc help CMD` (option notes)
+	ssh     bool     // takes ssh options (-p -i -J -o -F -l -4 -6 -A -C -q) and -v…
+	flags   []string // its own options, each declared in flagKinds
+	nargs   [2]int   // positional arguments: min, max (-1: any)
+	noJob   bool     // does not tie child processes to rcc (shim, version, help)
+	raw     bool     // arguments are not rcc's to parse: all of them are positional
+	short   string   // args in the overview, when leaving out the options is not enough
+	run     func(*invocation) int
+}
 
-on your machine:
-  rcc join [--alias NAME] INVITE              enroll this machine with an invite
-  rcc device invite [--ttl 24h] HOST          invite another machine of yours
-  rcc device list HOST                        your devices and pending invites
-  rcc device remove [--force] HOST DEVICE     remove a device (key comment or fingerprint)
-  rcc login|logout|status|setup-token [--account NAME | --rcb PROFILE] HOST
-  rcc rcb login URL                       link this machine to remote-claude-browser (approve in the workbench)
-  rcc rcb profiles | logout
-  rcc rcb use PROFILE [HOST]              remember for this directory; then just: rcc
-  rcc token [--account NAME | --rcb PROFILE] [--clear] HOST   store a setup-token for an account
-  rcc accounts HOST
-  rcc update [--check] [--version vX.Y.Z]     replace this program with a release
-  rcc version [--check]
+// synopsis is "rcc NAME ARGS".
+func (c *command) synopsis() string {
+	s := remote.Prog
+	if c.name != "" {
+		s += " " + c.name
+	}
+	if c.args != "" {
+		s += " " + c.args
+	}
+	return s
+}
 
-servers (run as root or with sudo on the Docker host):
-  rcc setup-server [--user owner] [--alias NAME] [--port 2222] [--bind ADDR]
-                   [--key FILE.pub]... [--install-docker] [server options] user@host
-                   install a server with you as its first user, and configure this machine
-  rcc user add [--key FILE.pub]... [server options] user@host NAME   (no --key: prints an invite)
-  rcc user invite [--ttl 168h] [server options] user@host NAME
-  rcc user list | config NAME | remove [--purge] [--force] NAME ...
-  rcc update-server [--force] [--image IMG] [server options] user@host
-  rcc update-server --all [--force] [--image IMG]           every server remembered here
-  rcc servers [--forget user@host]                          servers remembered here (admin side)
-  rcc remove-server [--purge] [server options] user@host
-  rcc server init [server options] user@host                 gateway only
-  rcc server migrate --user NAME [--force] user@host           convert a 0.3/0.4 single-container server
-  rcc server egress --rcb URL [--image IMG] user@host          egress host for --rcb sessions (an RCB admin approves it)
-      server options: --install-dir DIR --data DIR --image IMG --public-host NAME --name INSTANCE
+// invocation is a parsed command line.
+type invocation struct {
+	cmd     *command
+	name    string        // the name it was called by
+	target  remote.Target // ssh options and -v (Dest left for the command)
+	pos     []string      // positional arguments
+	after   []string      // everything after "--"
+	str     map[string]string
+	list    map[string][]string
+	on      map[string]bool
+	version string // rcc's own
+}
 
-  rcc serve [--listen ADDR] [--token T] [--shell PATH]   the command agent alone (debugging)
-`
+func (in *invocation) s(name string) string   { return in.str[name] }
+func (in *invocation) b(name string) bool     { return in.on[name] }
+func (in *invocation) l(name string) []string { return in.list[name] }
+
+type flagKind int
+
+const (
+	strFlag flagKind = iota + 1
+	boolFlag
+	listFlag // repeatable, takes a value each time
+)
+
+// flagKinds declares every command option. A command lists the ones it takes.
+var flagKinds = map[string]flagKind{
+	// sessions and accounts
+	"--account": strFlag, "--profile": strFlag, "--claude": strFlag, "--rcb": strFlag,
+	"--no-prompt": boolFlag, "--no-is-sandbox": boolFlag, "--remote-git": boolFlag, "--clear": boolFlag,
+	// this machine
+	"--alias": strFlag, "--ttl": strFlag, "--version": strFlag, "--check": boolFlag,
+	// servers
+	"--install-dir": strFlag, "--data": strFlag, "--image": strFlag, "--public-host": strFlag, "--name": strFlag,
+	"--user": strFlag, "--port": strFlag, "--bind": strFlag, "--forget": strFlag, "--key": listFlag,
+	"--install-docker": boolFlag, "--purge": boolFlag, "--force": boolFlag, "--all": boolFlag,
+	// serve
+	"--listen": strFlag, "--token": strFlag, "--shell": strFlag, "-q": boolFlag,
+}
+
+// sshValue and sshBool are the ssh options a remote command passes through.
+var (
+	sshValue = map[string]bool{"-p": true, "-i": true, "-J": true, "-o": true, "-F": true, "-l": true}
+	sshBool  = map[string]bool{"-4": true, "-6": true, "-A": true, "-C": true, "-q": true}
+)
+
+// errHelp is parse's answer to -h / --help.
+var errHelp = errors.New("help requested")
+
+// parse splits args into ssh options (and -v…) when the command takes them,
+// the command's own options, positional arguments, and everything after
+// "--". Options and positional arguments may be mixed.
+func parse(c *command, args []string) (*invocation, error) {
+	in := &invocation{cmd: c, str: map[string]string{}, list: map[string][]string{}, on: map[string]bool{}}
+	own := map[string]bool{}
+	for _, f := range c.flags {
+		own[f] = true
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		value := func() (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			return args[i], nil
+		}
+		switch {
+		case a == "--":
+			in.after = args[i+1:]
+			return in, nil
+		case a == "-h" || a == "--help":
+			return in, errHelp
+		case own[a]: // before the ssh options: serve's -q is its own
+			switch flagKinds[a] {
+			case boolFlag:
+				in.on[a] = true
+			case strFlag:
+				v, err := value()
+				if err != nil {
+					return nil, err
+				}
+				in.str[a] = v
+			case listFlag:
+				v, err := value()
+				if err != nil {
+					return nil, err
+				}
+				in.list[a] = append(in.list[a], v)
+			}
+		case c.ssh && len(a) >= 2 && a[0] == '-' && strings.Trim(a[1:], "v") == "":
+			// -v: rcc verbose; each extra v raises ssh's log level.
+			in.target.Verbose = true
+			if n := min(3, len(a)-2); n > 0 {
+				in.target.Args = append(in.target.Args, "-o", fmt.Sprintf("LogLevel=DEBUG%d", n))
+			}
+		case c.ssh && sshValue[a]:
+			v, err := value()
+			if err != nil {
+				return nil, err
+			}
+			in.target.Args = append(in.target.Args, a, v)
+		case c.ssh && sshBool[a]:
+			in.target.Args = append(in.target.Args, a)
+		case strings.HasPrefix(a, "-") && len(a) > 1:
+			return nil, fmt.Errorf("unknown option %s", a)
+		default:
+			in.pos = append(in.pos, a)
+		}
+	}
+	return in, nil
+}
+
+var commands []*command
+
+// renamed is the commands' names before the noun-verb layout. They are not accepted any more
+// (a session would take them for a HOST): rcc says the new name instead.
+var renamed = map[string]string{
+	"setup-server": "server setup", "update-server": "server update", "remove-server": "server remove", "servers": "server list",
+	"login": "account login", "logout": "account logout", "status": "account status", "setup-token": "account setup-token",
+	"token": "account token", "accounts": "account list",
+	"join": "device join", "user": "server user",
+}
+
+func init() { commands = commandTable() }
+
+// The two kinds of host a command names.
+const (
+	// hostHelp: what session, account and device commands connect to.
+	hostHelp = "HOST is your container: the ssh alias that server setup or device join made (e.g. myserver-cc)."
+	// serverHelp: what server and user commands connect to.
+	serverHelp = "SERVER is the Docker host itself, over ssh as root or a sudo user (e.g. root@myserver).\n" +
+		"server options: --install-dir DIR --data DIR --image IMG --public-host NAME --name INSTANCE"
+	sshHelp = "ssh options: -p PORT -i KEY -J JUMP -o OPT -F CONFIG -l USER -4 -6 -A -C -q;\n" +
+		"-v, -vv, -vvv, -vvvv: verbose; extra v's make ssh verbose too"
+)
+
+// commandTable is every command, in help order. The session (no name) comes
+// first.
+func commandTable() []*command {
+	const (
+		gSession = "Claude Code in your container (HOST), working on a directory here"
+		gLocal   = "your container (HOST) and this machine"
+		gRCB     = "remote-claude-browser (as one of its browser profiles)"
+		gServer  = "administration (SERVER: the Docker host, as root or with sudo)"
+		gDebug   = "debugging"
+	)
+	srvOpts := []string{"--install-dir", "--data", "--image", "--public-host", "--name"}
+	srv := func(own ...string) []string { return append(own, srvOpts...) }
+	const rcbHost = "\nWith --rcb, HOST may be left out: the server set for this directory (rcb use), or the only one."
+	account := func(action, args, summary string, flags ...string) *command {
+		return &command{name: "account " + action, args: args, group: gLocal, ssh: true,
+			summary: summary, help: hostHelp + rcbHost + "\n--claude PATH: claude in the container.\n" + sshHelp,
+			flags: append([]string{"--account", "--claude", "--rcb"}, flags...), nargs: [2]int{0, 1}, run: runAccount(action)}
+	}
+	const acctArgs = "[--account NAME | --rcb PROFILE] HOST"
+	return []*command{
+		{name: "", args: "[options] HOST [DIR] [-- CLAUDE-ARGS...]", group: gSession, ssh: true,
+			summary: "Claude Code in HOST, working on DIR (default .) here",
+			help: hostHelp + `
+options:
+  --account NAME         Claude login: default this machine's own; "default" = shared
+  --profile NAME         history: default this machine's own; "none" = the account's
+  --rcb PROFILE          run as a remote-claude-browser profile: its Claude account,
+                         all traffic through its proxy node (needs rcb login, server egress)
+  --claude PATH  --no-prompt  --no-is-sandbox
+  --remote-git           Claude Code's own git calls (status, --worktree, …) run
+                         in the container instead of here
+Arguments after -- go to claude.
+With no HOST, the profile and server set for this directory (rcb use) apply.
+` + sshHelp,
+			flags: []string{"--claude", "--profile", "--account", "--rcb", "--no-prompt", "--no-is-sandbox", "--remote-git"},
+			nargs: [2]int{0, 2}, run: runSession},
+
+		account("login", acctArgs, "sign in to Claude, for one account"),
+		account("logout", acctArgs, "sign out"),
+		account("status", acctArgs, "the account's login state"),
+		account("setup-token", acctArgs, "make a long-lived token (then: account token)"),
+		account("token", "[--account NAME | --rcb PROFILE] [--clear] HOST", "store a setup-token for an account (--clear: remove it)", "--clear"),
+		{name: "account list", args: "HOST", group: gLocal, ssh: true, summary: "every account and its login state",
+			help: hostHelp + "\n--claude PATH: claude in the container.\n" + sshHelp, flags: []string{"--claude"}, nargs: [2]int{1, 1}, run: runAccount("accounts")},
+		{name: "device join", args: "[--alias NAME] INVITE", group: gLocal, summary: "enroll this machine with an invite (sets up HOST)",
+			help: "--alias NAME: the HOST name to give it (default: from the invite).", flags: []string{"--alias"}, nargs: [2]int{1, 1}, run: runJoin},
+		{name: "device invite", args: "[--ttl 24h] HOST", group: gLocal, summary: "invite another machine of yours", help: hostHelp,
+			flags: []string{"--ttl"}, nargs: [2]int{1, 1}, run: runDeviceInvite},
+		{name: "device list", args: "HOST", group: gLocal, summary: "your devices and pending invites", help: hostHelp,
+			nargs: [2]int{1, 1}, run: runDeviceList},
+		{name: "device remove", args: "[--force] HOST DEVICE", group: gLocal, summary: "remove a device (key comment or fingerprint)", help: hostHelp,
+			flags: []string{"--force"}, nargs: [2]int{2, 2}, run: runDeviceRemove},
+		{name: "update", args: "[--check] [--force] [--version vX.Y.Z]", group: gLocal, summary: "replace this program with a release",
+			flags: []string{"--check", "--force", "--version"}, nargs: [2]int{0, 0}, run: runUpdate},
+		{name: "version", args: "[--check]", group: gLocal, summary: "this program's version (--check: and the latest)",
+			flags: []string{"--check"}, nargs: [2]int{0, 0}, noJob: true, run: runVersion},
+
+		{name: "rcb login", args: "URL", group: gRCB, summary: "link this machine (approve it in the workbench)",
+			nargs: [2]int{1, 1}, run: runRCBLogin},
+		{name: "rcb profiles", group: gRCB, summary: "your browser profiles", nargs: [2]int{0, 0}, run: runRCBProfiles},
+		{name: "rcb use", args: "PROFILE [HOST]", group: gRCB, summary: "remember for this directory; then just: rcc",
+			help: hostHelp, nargs: [2]int{1, 2}, run: runRCBUse},
+		{name: "rcb logout", group: gRCB, summary: "forget the link", nargs: [2]int{0, 0}, run: runRCBLogout},
+
+		{name: "server setup", group: gServer, ssh: true,
+			args:    "[--user owner] [--alias NAME] [--port 2222] [--bind ADDR] [--key FILE.pub]... [--install-docker] [server options] SERVER",
+			summary: "install a server, you as its first user; set up HOST here", help: serverHelp + "\n--alias NAME: the HOST name for it here (default <server>-cc).",
+			flags: srv("--user", "--alias", "--port", "--bind", "--key", "--install-docker"), nargs: [2]int{1, 1}, run: runSetupServer},
+		{name: "server update", args: "[--force] [--image IMG] [server options] SERVER | --all [--force] [--image IMG]",
+			short: "SERVER | --all", group: gServer, help: serverHelp, ssh: true,
+			summary: "new server image; recreate what changed (--all: every server here)",
+			flags:   srv("--force", "--all"), nargs: [2]int{0, 1}, run: runUpdateServer},
+		{name: "server list", args: "[--forget SERVER [--install-dir DIR]]", group: gServer,
+			summary: "servers this machine administers", help: serverHelp,
+			flags: []string{"--forget", "--install-dir"}, nargs: [2]int{0, 0}, run: runServers},
+		{name: "server remove", args: "[--purge] [server options] SERVER", group: gServer,
+			summary: "remove the containers (--purge: and the data)", help: serverHelp, ssh: true,
+			flags: srv("--purge"), nargs: [2]int{1, 1}, run: runRemoveServer},
+		{name: "server init", args: "[--port 2222] [--bind ADDR] [--install-docker] [server options] SERVER", group: gServer,
+			summary: "gateway only", help: serverHelp, ssh: true,
+			flags: srv("--port", "--bind", "--install-docker"), nargs: [2]int{1, 1}, run: runServerInit},
+		{name: "server migrate", args: "--user NAME [--alias NAME] [--force] [server options] SERVER", group: gServer,
+			summary: "convert a 0.3/0.4 single-container server", help: serverHelp, ssh: true,
+			flags: srv("--user", "--alias", "--force"), nargs: [2]int{1, 1}, run: runServerMigrate},
+		{name: "server egress", args: "--rcb URL [server options] SERVER", group: gServer,
+			summary: "egress host for --rcb sessions (an RCB admin approves it)", help: serverHelp, ssh: true,
+			flags: srv("--rcb"), nargs: [2]int{1, 1}, run: runServerEgress},
+		{name: "server user add", args: "[--key FILE.pub]... [--alias NAME] [server options] SERVER NAME", group: gServer,
+			summary: "add a user (no --key: prints an invite)", help: serverHelp, ssh: true,
+			flags: srv("--key", "--alias"), nargs: [2]int{2, 2}, run: runUserAdd},
+		{name: "server user invite", args: "[--ttl 168h] [--alias NAME] [server options] SERVER NAME", group: gServer,
+			summary: "a new invite for a user", help: serverHelp, ssh: true,
+			flags: srv("--ttl", "--alias"), nargs: [2]int{2, 2}, run: runUserInvite},
+		{name: "server user list", args: "[server options] SERVER", group: gServer, summary: "the users", help: serverHelp, ssh: true,
+			flags: srv(), nargs: [2]int{1, 1}, run: runUserList},
+		{name: "server user config", args: "[--alias NAME] [server options] SERVER NAME", group: gServer,
+			summary: "a user's ssh config", help: serverHelp, ssh: true,
+			flags: srv("--alias"), nargs: [2]int{2, 2}, run: runUserConfig},
+		{name: "server user remove", args: "[--purge] [--force] [server options] SERVER NAME", group: gServer,
+			summary: "remove a user (--purge: and their data)", help: serverHelp, ssh: true,
+			flags: srv("--purge", "--force"), nargs: [2]int{2, 2}, run: runUserRemove},
+
+		{name: "serve", args: "[--listen ADDR] [--token T] [--shell PATH] [-q]", group: gDebug,
+			summary: "the command agent alone", flags: []string{"--listen", "--token", "--shell", "-q"}, nargs: [2]int{0, 0}, run: runServe},
+		{name: "shim", args: "COMMAND", nargs: [2]int{0, -1}, noJob: true, raw: true,
+			run: func(in *invocation) int { return runShim(in.pos) }},
+		{name: "help", args: "[COMMAND]", nargs: [2]int{0, -1}, noJob: true, run: runHelp},
+	}
+}
+
+// lookup finds the command args start with: the longest name that matches
+// whole words. noun is set when args start with a command group ("server",
+// "server user", …) but name none of its commands: the longest such group.
+func lookup(args []string) (c *command, name string, rest []string, noun string) {
+	for _, n := range []int{3, 2, 1} {
+		if len(args) < n {
+			continue
+		}
+		words := strings.Join(args[:n], " ")
+		for _, c := range commands {
+			if c.name == words {
+				return c, words, args[n:], ""
+			}
+		}
+	}
+	for n := min(2, len(args)); n > 0; n-- {
+		if w := strings.Join(args[:n], " "); isNoun(w) {
+			return nil, "", nil, w
+		}
+	}
+	return nil, "", nil, ""
+}
+
+func isNoun(w string) bool {
+	for _, c := range commands {
+		if strings.HasPrefix(c.name, w+" ") {
+			return true
+		}
+	}
+	return false
+}
 
 // Main runs rcc with os.Args-style arguments and returns the exit code.
 func Main(args []string, version string) int {
@@ -87,59 +347,192 @@ func Main(args []string, version string) int {
 		return shim.Git(args[1:])
 	}
 	remote.Prog = prog
-	if len(args) < 2 {
+	args = args[1:]
+	if len(args) == 0 {
 		// In a directory set up with `rcb use`, a bare command starts the session.
-		if cwd, err := os.Getwd(); err == nil {
-			if _, _, ok := rcb.Lookup(cwd); ok {
-				_ = procjob.KillOnExit()
-				return runSession(nil)
-			}
+		if cwd, err := os.Getwd(); err != nil || !rcbDirectory(cwd) {
+			usage(os.Stderr)
+			return 2
 		}
-		usage()
+	}
+	if len(args) > 0 && args[0] == "--version" {
+		args[0] = "version"
+	}
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		args = []string{"help"}
+	}
+	if len(args) > 0 && renamed[args[0]] != "" {
+		old, now := args[0], renamed[args[0]]
+		if isNoun(now) && len(args) > 1 { // user add → server user add
+			old, now = old+" "+args[1], now+" "+args[1]
+		}
+		fmt.Fprintf(os.Stderr, "rcc: %s is now: %s %s (see: %[2]s help %[3]s)\n", old, remote.Prog, now)
 		return 2
 	}
+	c, name, rest, noun := lookup(args)
+	if noun != "" {
+		groupUsage(os.Stderr, noun)
+		return 2
+	}
+	if c == nil { // anything else is a session: rcc [options] HOST [DIR]
+		c, name, rest = commands[0], "", args
+	}
+	return dispatch(c, name, rest, version)
+}
+
+func rcbDirectory(dir string) bool { _, _, ok := rcb.Lookup(dir); return ok }
+
+func dispatch(c *command, name string, args []string, version string) int {
 	update.CleanupOld()
-	cmd, rest := args[1], args[2:]
-	if cmd != "shim" && cmd != "version" && cmd != "--version" {
+	if !c.noJob {
 		// Whatever rcc starts on this machine (commands, ssh) ends with it.
 		if err := procjob.KillOnExit(); err != nil {
 			fmt.Fprintln(os.Stderr, "rcc: warning: child processes may outlive rcc:", err)
 		}
 	}
-	switch cmd {
-	case "help", "-h", "--help":
-		usage()
-		return 0
-	case "version", "--version":
-		fmt.Println(prog, version)
-		if len(rest) > 0 && rest[0] == "--check" {
-			if tag, err := update.Latest(); err == nil {
-				fmt.Printf("latest release: %s%s\n", tag, map[bool]string{true: "  (run: " + prog + " update)", false: ""}[update.Newer(tag, version)])
-			}
-		}
-		return 0
-	case "update":
-		return runUpdate(rest, version)
-	case "serve":
-		return runServe(rest)
-	case "shim":
-		return runShim(rest)
-	case "join":
-		return runJoin(rest)
-	case "device":
-		return runDevice(rest)
-	case "login", "logout", "status", "setup-token", "token", "accounts":
-		return runAccount(cmd, rest)
-	case "rcb":
-		return runRCB(rest)
-	case "setup-server", "update-server", "remove-server", "server", "user", "servers":
-		return runServer(cmd, rest)
+	in, err := &invocation{cmd: c, pos: args}, error(nil)
+	if !c.raw {
+		in, err = parse(c, args)
 	}
-	return runSession(args[1:])
+	if err == errHelp {
+		commandHelp(os.Stdout, c)
+		return 0
+	}
+	if err == nil && (len(in.pos) < c.nargs[0] || (c.nargs[1] >= 0 && len(in.pos) > c.nargs[1])) {
+		err = errors.New("wrong number of arguments")
+		if c.name == "" && len(in.pos) > c.nargs[1] {
+			err = fmt.Errorf("too many arguments (%q is not a command: %s help)", in.pos[0], remote.Prog)
+		}
+	}
+	if err != nil {
+		return usageError(c, err)
+	}
+	in.name, in.version = name, version
+	return c.run(in)
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, strings.ReplaceAll(usageText, "  rcc ", "  "+remote.Prog+" "))
+// usageError reports a bad command line, with the command's synopsis.
+func usageError(c *command, err error) int {
+	fmt.Fprintf(os.Stderr, "rcc: %v\nusage: %s\n", err, c.synopsis())
+	if c.name != "help" {
+		fmt.Fprintf(os.Stderr, "(more: %s)\n", strings.TrimSpace(remote.Prog+" help "+c.name))
+	}
+	return 2
+}
+
+// badUsage marks a run function's error as a bad command line (exit 2,
+// with the synopsis) rather than a failure.
+type badUsage struct{ error }
+
+// usage is the overview: every command with its positional arguments,
+// grouped. The options are in `rcc help COMMAND`.
+func usage(w io.Writer) {
+	var list []*command
+	for _, c := range commands {
+		if c.group != "" {
+			list = append(list, c)
+		}
+	}
+	fmt.Fprintln(w, "usage:")
+	width, group := listWidth(list), list[0].group
+	for _, c := range list {
+		if c.group != group {
+			fmt.Fprintf(w, "\n%s:\n", c.group)
+			group = c.group
+		}
+		fmt.Fprint(w, listLine(c, width))
+	}
+	fmt.Fprintf(w, "\noptions and details of one command: %s help COMMAND (e.g. %[1]s help server user add)\n", remote.Prog)
+}
+
+// groupUsage lists the commands under one noun ("user", "rcb", …).
+func groupUsage(w io.Writer, noun string) {
+	var list []*command
+	for _, c := range commands {
+		if strings.HasPrefix(c.name, noun+" ") {
+			list = append(list, c)
+		}
+	}
+	fmt.Fprintln(w, "usage:")
+	width := listWidth(list)
+	for _, c := range list {
+		fmt.Fprint(w, listLine(c, width))
+	}
+	fmt.Fprintf(w, "\noptions and details: %s help %s COMMAND\n", remote.Prog, noun)
+}
+
+// brief is "rcc NAME ARGS" without the options: "[--ttl 24h]",
+// "[--key FILE.pub]...", "--user NAME", "[server options]".
+func (c *command) brief() string {
+	args := c.short
+	if args == "" {
+		args = optGroup.ReplaceAllString(strings.ReplaceAll(c.args, "[server options]", ""), "")
+	}
+	return strings.Join(strings.Fields(remote.Prog+" "+c.name+" "+args), " ")
+}
+
+var optGroup = regexp.MustCompile(`\[-[^\[\]]*(\[[^\[\]]*\])?[^\[\]]*\](\.\.\.)?|--\w[\w-]* [A-Z]+\b`)
+
+// listWidth is the column the summaries start at (long synopses push their
+// summary to the next line).
+func listWidth(list []*command) int {
+	const max = 40
+	w := 0
+	for _, c := range list {
+		if n := len(c.brief()); n <= max && n > w {
+			w = n
+		}
+	}
+	return w
+}
+
+func listLine(c *command, width int) string {
+	sum := strings.ReplaceAll(c.summary, "rcc", remote.Prog)
+	if b := c.brief(); len(b) <= width {
+		return fmt.Sprintf("  %-*s   %s\n", width, b, sum)
+	} else {
+		return fmt.Sprintf("  %s\n  %*s   %s\n", b, width, "", sum)
+	}
+}
+
+func commandHelp(w io.Writer, c *command) {
+	fmt.Fprintf(w, "usage: %s\n", c.synopsis())
+	if c.summary != "" {
+		fmt.Fprintf(w, "\n%s\n", strings.ReplaceAll(c.summary, "rcc", remote.Prog))
+	}
+	if c.help != "" {
+		fmt.Fprintf(w, "\n%s\n", c.help)
+	}
+}
+
+// runHelp: rcc help [COMMAND…].
+func runHelp(in *invocation) int {
+	if len(in.pos) == 0 {
+		usage(os.Stdout)
+		return 0
+	}
+	c, _, rest, noun := lookup(in.pos)
+	switch {
+	case noun != "":
+		groupUsage(os.Stdout, noun)
+	case c != nil && len(rest) == 0:
+		commandHelp(os.Stdout, c)
+	default:
+		fmt.Fprintf(os.Stderr, "rcc: no command %q; commands: %s\n", strings.Join(in.pos, " "), strings.Join(commandNames(), ", "))
+		return 2
+	}
+	return 0
+}
+
+func commandNames() []string {
+	var ns []string
+	for _, c := range commands {
+		if c.group != "" && c.name != "" {
+			ns = append(ns, c.name)
+		}
+	}
+	sort.Strings(ns)
+	return ns
 }
 
 func fail(err error) int {
@@ -158,583 +551,4 @@ func code(c int, err error) int {
 		}
 	}
 	return c
-}
-
-// flags declares a command's options besides the shared ssh ones.
-type flags struct {
-	str   map[string]*string
-	list  map[string]*[]string
-	bools map[string]*bool
-}
-
-// parse splits args into the ssh target options (and -v…), the command's
-// own flags, positional arguments, and everything after "--".
-func parse(args []string, f flags) (t remote.Target, pos, after []string, err error) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		next := func() (string, error) {
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("%s needs a value", a)
-			}
-			i++
-			return args[i], nil
-		}
-		switch {
-		case a == "--":
-			return t, pos, args[i+1:], nil
-		case len(a) >= 2 && a[0] == '-' && strings.Trim(a[1:], "v") == "":
-			// -v: rcc verbose; each extra v raises ssh's log level.
-			t.Verbose = true
-			if n := min(3, len(a)-2); n > 0 {
-				t.Args = append(t.Args, "-o", fmt.Sprintf("LogLevel=DEBUG%d", n))
-			}
-		case a == "-p" || a == "-i" || a == "-J" || a == "-o" || a == "-F" || a == "-l":
-			v, e := next()
-			if e != nil {
-				return t, nil, nil, e
-			}
-			t.Args = append(t.Args, a, v)
-		case a == "-4" || a == "-6" || a == "-A" || a == "-C" || a == "-q":
-			t.Args = append(t.Args, a)
-		case f.str[a] != nil:
-			v, e := next()
-			if e != nil {
-				return t, nil, nil, e
-			}
-			*f.str[a] = v
-		case f.list[a] != nil:
-			v, e := next()
-			if e != nil {
-				return t, nil, nil, e
-			}
-			*f.list[a] = append(*f.list[a], v)
-		case f.bools[a] != nil:
-			*f.bools[a] = true
-		case strings.HasPrefix(a, "-") && len(a) > 1:
-			return t, nil, nil, fmt.Errorf("unknown option %s", a)
-		default:
-			pos = append(pos, a)
-		}
-	}
-	return t, pos, nil, nil
-}
-
-func runSession(args []string) int {
-	var c client.Config
-	var rcbSel string
-	t, pos, after, err := parse(args, flags{
-		str:   map[string]*string{"--claude": &c.ClaudePath, "--profile": &c.Profile, "--account": &c.Account, "--rcb": &rcbSel},
-		bools: map[string]*bool{"--no-prompt": &c.NoPrompt, "--no-is-sandbox": &c.NoIsSandbox, "--remote-git": &c.RemoteGit},
-	})
-	if err == nil && len(pos) == 0 {
-		var host string
-		if rcbSel, host, err = rcbDefaults(rcbSel); err == nil {
-			pos = []string{host}
-		}
-	}
-	if err != nil || len(pos) < 1 || len(pos) > 2 {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "rcc:", err)
-		}
-		usage()
-		return 2
-	}
-	if c.RCB, c.RCBLink, err = rcbProfile(rcbSel); err != nil {
-		return fail(err)
-	}
-	if err := pinAccount(&c); err != nil {
-		return fail(err)
-	}
-	t.Dest = pos[0]
-	c.Target, c.ClaudeArgs, c.Dir = t, after, "."
-	if len(pos) == 2 {
-		c.Dir = pos[1]
-	}
-	return code(client.Run(c))
-}
-
-func runAccount(action string, args []string) int {
-	var c client.Config
-	var clear bool
-	var rcbSel string
-	t, pos, after, err := parse(args, flags{
-		str:   map[string]*string{"--account": &c.Account, "--claude": &c.ClaudePath, "--rcb": &rcbSel},
-		bools: map[string]*bool{"--clear": &clear},
-	})
-	if err == nil && len(pos) == 0 && rcbSel != "" {
-		var host string
-		if rcbSel, host, err = rcbDefaults(rcbSel); err == nil {
-			pos = []string{host}
-		}
-	}
-	if err != nil || len(pos) != 1 {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "rcc:", err)
-		}
-		fmt.Fprintf(os.Stderr, "usage: %s %s [--account NAME | --rcb PROFILE] HOST\n", remote.Prog, action)
-		return 2
-	}
-	if rcbSel != "" && action == "accounts" {
-		return fail(errors.New("accounts lists every account; --rcb does not apply"))
-	}
-	if c.RCB, c.RCBLink, err = rcbProfile(rcbSel); err != nil {
-		return fail(err)
-	}
-	if err := pinAccount(&c); err != nil {
-		return fail(err)
-	}
-	if action == "token" && (clear || (len(after) > 0 && after[0] == "--clear")) {
-		action = "token-clear"
-	}
-	t.Dest = pos[0]
-	c.Target = t
-	return code(client.Account(c, action, after))
-}
-
-func runJoin(args []string) int {
-	var alias string
-	_, pos, _, err := parse(args, flags{str: map[string]*string{"--alias": &alias}})
-	if err != nil || len(pos) != 1 {
-		fmt.Fprintf(os.Stderr, "usage: %s join [--alias NAME] INVITE\n", remote.Prog)
-		return 2
-	}
-	s, err := sshconf.Join(pos[0], alias)
-	if err != nil {
-		return fail(err)
-	}
-	fmt.Printf("\nDone: this machine can now reach %s as %q.\n  %s login %s     # sign in to Claude (once per machine)\n  %s %s           # in a project directory\n",
-		s.Host, s.Alias, remote.Prog, s.Alias, remote.Prog, s.Alias)
-	return 0
-}
-
-func runDevice(args []string) int {
-	usage := func() int {
-		fmt.Fprintf(os.Stderr, "usage:\n  %[1]s device invite [--ttl 24h] HOST\n  %[1]s device list HOST\n  %[1]s device remove [--force] HOST DEVICE\n", remote.Prog)
-		return 2
-	}
-	if len(args) == 0 {
-		return usage()
-	}
-	ttl := "24h"
-	var force bool
-	_, pos, _, err := parse(args[1:], flags{str: map[string]*string{"--ttl": &ttl}, bools: map[string]*bool{"--force": &force}})
-	if err != nil {
-		return usage()
-	}
-	switch {
-	case args[0] == "invite" && len(pos) == 1:
-		d, err := time.ParseDuration(ttl)
-		if err != nil {
-			return fail(errors.New("bad --ttl (e.g. 2h, 24h, 168h)"))
-		}
-		return fail(client.DeviceInvite(pos[0], d))
-	case args[0] == "list" && len(pos) == 1:
-		return fail(client.DeviceList(pos[0]))
-	case args[0] == "remove" && len(pos) == 2:
-		return fail(client.DeviceRemove(pos[0], pos[1], force))
-	}
-	return usage()
-}
-
-func runServer(cmd string, args []string) int {
-	sub := ""
-	if cmd == "server" || cmd == "user" {
-		if len(args) == 0 {
-			usage()
-			return 2
-		}
-		sub, args = args[0], args[1:]
-	}
-	var c server.Config
-	var port, user, alias, ttl, image, rcbURL string
-	var keys []string
-	var purge, force, all bool
-	var forget string
-	t, pos, _, err := parse(args, flags{
-		str: map[string]*string{"--install-dir": &c.InstallDir, "--data": &c.DataDir, "--port": &port, "--bind": &c.Bind,
-			"--image": &image, "--public-host": &c.PublicHost, "--name": &c.Name, "--user": &user, "--alias": &alias, "--ttl": &ttl,
-			"--rcb": &rcbURL, "--forget": &forget},
-		list:  map[string]*[]string{"--key": &keys},
-		bools: map[string]*bool{"--install-docker": &c.InstallDocker, "--purge": &purge, "--force": &force, "--all": &all},
-	})
-	if err != nil {
-		return fail(err)
-	}
-	if port != "" {
-		p, err := strconv.Atoi(port)
-		if err != nil || p < 1 || p > 65535 {
-			return fail(errors.New("bad --port"))
-		}
-		c.Port = p
-	}
-	c.Image = image
-	need := func(n int) bool {
-		if len(pos) != n {
-			usage()
-			return false
-		}
-		t.Dest = pos[0]
-		c.Target = t
-		return true
-	}
-	switch {
-	case cmd == "servers" && len(pos) == 0:
-		if forget != "" {
-			n, err := server.Forget(forget, c.InstallDir)
-			if err == nil && n == 0 {
-				err = fmt.Errorf("no remembered server %q (see: %s servers)", forget, remote.Prog)
-			}
-			return fail(err)
-		}
-		return fail(server.ListKnown())
-	case cmd == "update-server" && all:
-		if len(pos) != 0 {
-			return fail(errors.New("update-server --all takes no host"))
-		}
-		c.Target = t
-		return fail(server.UpdateAll(c, image, force))
-	case cmd == "setup-server" && need(1):
-		var extra []string
-		for _, kf := range keys {
-			b, err := os.ReadFile(kf)
-			if err != nil {
-				return fail(err)
-			}
-			for _, l := range strings.Split(string(b), "\n") {
-				if l = strings.TrimSpace(l); sshconf.Fingerprint(l) != "" {
-					extra = append(extra, l)
-				}
-			}
-		}
-		return fail(server.Setup(c, user, alias, extra))
-	case cmd == "update-server" && need(1):
-		return fail(server.Update(c, image, force))
-	case cmd == "remove-server" && need(1):
-		return fail(server.Remove(c, purge))
-	case cmd == "server" && sub == "init" && need(1):
-		return fail(server.Init(c))
-	case cmd == "server" && sub == "egress" && need(1):
-		if rcbURL == "" {
-			return fail(errors.New("server egress needs --rcb URL (your remote-claude-browser)"))
-		}
-		return fail(server.Egress(c, rcbURL, image))
-	case cmd == "server" && sub == "migrate" && need(1):
-		if user == "" {
-			return fail(errors.New("server migrate needs --user NAME (the name the current owner gets)"))
-		}
-		return fail(server.Migrate(c, user, alias, force))
-	case cmd == "user" && sub == "list" && need(1):
-		return fail(server.UserList(c))
-	case cmd == "user" && sub == "add" && need(2):
-		return fail(server.UserAdd(c, pos[1], keys, alias))
-	case cmd == "user" && sub == "invite" && need(2):
-		d := 7 * 24 * time.Hour
-		if ttl != "" {
-			if d, err = time.ParseDuration(ttl); err != nil {
-				return fail(errors.New("bad --ttl (e.g. 24h, 168h)"))
-			}
-		}
-		return fail(server.UserInvite(c, pos[1], alias, d))
-	case cmd == "user" && sub == "config" && need(2):
-		return fail(server.UserConfig(c, pos[1], alias))
-	case cmd == "user" && sub == "remove" && need(2):
-		return fail(server.UserRemove(c, pos[1], purge, force))
-	}
-	return 2
-}
-
-func runUpdate(args []string, version string) int {
-	var want string
-	var check, force bool
-	_, pos, _, err := parse(args, flags{str: map[string]*string{"--version": &want},
-		bools: map[string]*bool{"--check": &check, "--force": &force}})
-	if err != nil || len(pos) != 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s update [--check] [--force] [--version vX.Y.Z]\n", remote.Prog)
-		return 2
-	}
-	tag := want
-	if tag == "" {
-		if tag, err = update.Latest(); err != nil {
-			return fail(err)
-		}
-	}
-	if !strings.HasPrefix(tag, "v") {
-		tag = "v" + tag
-	}
-	fmt.Printf("current: %s   %s: %s\n", version, map[bool]string{true: "requested", false: "latest"}[want != ""], tag)
-	if check {
-		return 0
-	}
-	if want == "" && !force && !update.Newer(tag, version) {
-		fmt.Println("already up to date")
-		return 0
-	}
-	exe, err := update.Install(tag)
-	if err != nil {
-		return fail(fmt.Errorf("update failed: %w", err))
-	}
-	fmt.Printf("updated %s to %s\nservers: run `%s update-server <host>` to update a remote-cc server\n", exe, tag, remote.Prog)
-	return 0
-}
-
-func runShim(args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "rcc-shim: expected exactly one argument (the command string)")
-		return 126
-	}
-	return shim.Run(args[0])
-}
-
-// runServe runs the command agent alone, for debugging the command channel.
-func runServe(args []string) int {
-	listen, token, shell := "127.0.0.1:0", "", ""
-	var quiet bool
-	_, pos, _, err := parse(args, flags{str: map[string]*string{"--listen": &listen, "--token": &token, "--shell": &shell},
-		bools: map[string]*bool{"-q": &quiet}})
-	if err != nil || len(pos) != 0 {
-		fmt.Fprintln(os.Stderr, "usage: rcc serve [--listen ADDR] [--token TOKEN] [--shell PATH] [-q]")
-		return 2
-	}
-	if token == "" {
-		token = remote.RandHex(16)
-	}
-	opt := agent.Options{Token: token, Shell: shell}
-	if !quiet {
-		opt.Logger = log.New(os.Stderr, "rcc: ", log.LstdFlags)
-	}
-	a, err := agent.New(opt)
-	if err != nil {
-		return fail(err)
-	}
-	l, err := net.Listen("tcp", listen)
-	if err != nil {
-		return fail(err)
-	}
-	fmt.Fprintf(os.Stderr, "rcc: agent listening on %s (shell %s)\n", l.Addr(), a.Shell())
-	fmt.Fprintf(os.Stderr, "rcc: on the server: export RCC_SOCK=<forwarded socket> RCC_TOKEN=%s CLAUDE_CODE_SHELL_PREFIX=<path to rcc-shim>\n", token)
-	return fail(a.Serve(l))
-}
-
-// pinAccount picks the Claude account: --rcb always means its profile's own
-// (RCC_ACCOUNT does not apply, a different --account is an error); else
-// --account, else RCC_ACCOUNT.
-func pinAccount(c *client.Config) error {
-	if p := c.RCB; p != nil {
-		if c.Account != "" && c.Account != p.Account() {
-			return fmt.Errorf("--rcb %s uses account %s; drop --account %s", p.ID, p.Account(), c.Account)
-		}
-		c.Account = p.Account()
-		return nil
-	}
-	if c.Account == "" {
-		c.Account = os.Getenv("RCC_ACCOUNT")
-	}
-	return nil
-}
-
-// rcbProfile resolves --rcb against the linked remote-claude-browser.
-func rcbProfile(sel string) (*rcb.Profile, *rcb.Link, error) {
-	if sel == "" {
-		return nil, nil, nil
-	}
-	l, err := rcb.Load()
-	if err != nil {
-		return nil, nil, err
-	}
-	ps, err := rcb.Profiles(l)
-	if err != nil {
-		return nil, nil, err
-	}
-	p, err := chooseProfile(ps, sel)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := p.Usable(); err != nil {
-		return nil, nil, err
-	}
-	exit := "exit not checked yet"
-	if p.Exit != nil {
-		exit = "exit " + p.Exit.IP
-		if p.Exit.TimeZone != "" {
-			exit += ", " + p.Exit.TimeZone
-		}
-	}
-	fmt.Fprintf(os.Stderr, "rcc: profile %s → node %s (%s)\n", p.Label(), p.Node.Name, exit)
-	return &p, &l, nil
-}
-
-// chooseProfile is rcb.Find, asking which one when a name fits several.
-func chooseProfile(ps []rcb.Profile, sel string) (rcb.Profile, error) {
-	p, err := rcb.Find(ps, sel)
-	var amb *rcb.AmbiguousError
-	if !errors.As(err, &amb) || !term.IsTerminal(int(os.Stdin.Fd())) {
-		return p, err
-	}
-	fmt.Fprintf(os.Stderr, "%q fits several profiles:\n", sel)
-	for i, c := range amb.Candidates {
-		node := "no node"
-		if c.Node != nil {
-			node = c.Node.Name
-		}
-		fmt.Fprintf(os.Stderr, "  %d) %s  %s  [%s]\n", i+1, c.ID, c.Label(), node)
-	}
-	fmt.Fprint(os.Stderr, "which one? ")
-	var answer string
-	fmt.Scanln(&answer)
-	n, convErr := strconv.Atoi(strings.TrimSpace(answer))
-	if convErr != nil || n < 1 || n > len(amb.Candidates) {
-		return rcb.Profile{}, errors.New("no profile chosen")
-	}
-	return amb.Candidates[n-1], nil
-}
-
-// rcbDefaults fills in what a command left out: the profile (and server)
-// remembered for this directory, else the only remote-cc server here.
-func rcbDefaults(sel string) (profile, host string, err error) {
-	cwd, _ := os.Getwd()
-	u, dir, ok := rcb.Lookup(cwd)
-	if sel == "" {
-		if !ok {
-			return "", "", errors.New("no HOST given, and this directory has no profile (rcb use PROFILE)")
-		}
-		fmt.Fprintf(os.Stderr, "rcc: using profile %s on %s (set for %s)\n", u.Profile, u.Server, dir)
-		return u.Profile, u.Server, nil
-	}
-	if ok && u.Server != "" {
-		return sel, u.Server, nil
-	}
-	switch servers := rcb.Servers(); len(servers) {
-	case 1:
-		return sel, servers[0], nil
-	case 0:
-		return "", "", errors.New("no remote-cc server on this machine yet (join one first)")
-	default:
-		return "", "", fmt.Errorf("which server? give HOST, one of: %s", strings.Join(servers, ", "))
-	}
-}
-
-func runRCB(args []string) int {
-	usage := func() int {
-		fmt.Fprintf(os.Stderr, "usage:\n  %[1]s rcb login URL          link this machine (approve it in the workbench)\n  %[1]s rcb profiles           your browser profiles\n  %[1]s rcb use PROFILE [HOST] remember for this directory; then just: %[1]s\n  %[1]s rcb logout             forget the link\n", remote.Prog)
-		return 2
-	}
-	if len(args) == 0 {
-		return usage()
-	}
-	switch {
-	case args[0] == "login" && len(args) == 2:
-		u, err := rcb.NormalizeURL(args[1])
-		if err != nil {
-			return fail(err)
-		}
-		tok := strings.TrimSpace(os.Getenv("RCC_RCB_TOKEN"))
-		if tok == "" {
-			name, _ := os.Hostname()
-			if tok, err = rcb.Connect(u, "client", name, func(code, link string) {
-				fmt.Fprintf(os.Stderr, "Approve this computer in remote-claude-browser (you need to be logged in there):\n\n  %s\n\n  connection code: %s\n\nwaiting for approval …\n", link, code)
-				openBrowser(link)
-			}); err != nil {
-				return fail(err)
-			}
-		}
-		if !strings.HasPrefix(tok, "rcck_") {
-			return fail(errors.New("that is not a client token (they start with rcck_)"))
-		}
-		l := rcb.Link{URL: u, Token: tok}
-		ps, err := rcb.Profiles(l)
-		if err != nil {
-			return fail(err)
-		}
-		if err := rcb.Save(l); err != nil {
-			return fail(err)
-		}
-		fmt.Printf("linked to %s: %d profile(s)\n  %s rcb profiles            # list them\n  %s rcb use PROFILE         # in a project directory; then just: %s\n", u, len(ps), remote.Prog, remote.Prog, remote.Prog)
-		return 0
-	case args[0] == "use" && (len(args) == 2 || len(args) == 3):
-		l, err := rcb.Load()
-		if err != nil {
-			return fail(err)
-		}
-		ps, err := rcb.Profiles(l)
-		if err != nil {
-			return fail(err)
-		}
-		p, err := chooseProfile(ps, args[1])
-		if err != nil {
-			return fail(err)
-		}
-		if err := p.Usable(); err != nil {
-			return fail(err)
-		}
-		host := ""
-		if len(args) == 3 {
-			host = args[2]
-		} else if _, host, err = rcbDefaults(p.ID); err != nil {
-			return fail(err)
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fail(err)
-		}
-		if err := rcb.Remember(cwd, rcb.Use{Profile: p.ID, Server: host}); err != nil {
-			return fail(err)
-		}
-		fmt.Printf("%s now runs as profile %s on %s.\n", cwd, p.Label(), host)
-		fmt.Printf("  first time: %s login --rcb %s     # sign in once, in the profile's browser\n", remote.Prog, p.ID)
-		fmt.Printf("  then:       %s                     # here and in subdirectories\n", remote.Prog)
-		return 0
-	case args[0] == "profiles" && len(args) == 1:
-		l, err := rcb.Load()
-		if err != nil {
-			return fail(err)
-		}
-		ps, err := rcb.Profiles(l)
-		if err != nil {
-			return fail(err)
-		}
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tNAME\tCLAUDE ACCOUNT\tNODE\tEXIT\tTIME ZONE")
-		for _, p := range ps {
-			node, ip, tz := "-", "-", "-"
-			if p.Node != nil {
-				node = p.Node.Name
-			}
-			if p.Exit != nil {
-				ip, tz = p.Exit.IP, p.Exit.TimeZone
-			}
-			email := p.Email
-			switch {
-			case p.Unavailable:
-				email += " (unavailable)"
-			case email == "":
-				email = "-"
-			}
-			fmt.Fprintln(tw, strings.Join([]string{p.ID, p.Name, email, node, ip, tz}, "\t"))
-		}
-		tw.Flush()
-		return 0
-	case args[0] == "logout" && len(args) == 1:
-		return fail(rcb.Remove())
-	}
-	return usage()
-}
-
-// openBrowser tries to show link in this machine's browser; failure is fine.
-func openBrowser(link string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", link)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", link)
-	default:
-		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
-			return
-		}
-		cmd = exec.Command("xdg-open", link)
-	}
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if cmd.Start() == nil {
-		go cmd.Wait()
-	}
 }

@@ -48,7 +48,7 @@ func DeviceInvite(alias string, ttl time.Duration) error {
 	}
 	gf, _, err := run(fmt.Sprintf("invite %s %s %s %d", f[0], f[1], id, hours))
 	if err != nil || gf["exp"] == "" {
-		return fmt.Errorf("the gateway refused the invite (servers before rcc 0.5 need the admin: user invite): %v", err)
+		return fmt.Errorf("the gateway refused the invite (servers before rcc 0.5 need the admin: server user invite): %v", err)
 	}
 	_, gwKey, err := run("hostkey")
 	if err != nil {
@@ -179,7 +179,7 @@ func DeviceRemove(alias, which string, force bool) error {
 		}
 	}
 	if left == 0 {
-		return errors.New("that would remove every device of this user; the admin can do that (user remove)")
+		return errors.New("that would remove every device of this user; the admin can do that (server user remove)")
 	}
 	var b strings.Builder
 	for _, k := range keep {

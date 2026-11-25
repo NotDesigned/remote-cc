@@ -124,7 +124,7 @@ func Hint(sshErr string) string {
 	if strings.Contains(sshErr, "stdio forwarding failed") || strings.Contains(sshErr, "open failed: connect failed") ||
 		strings.Contains(sshErr, "Connection closed by UNKNOWN port 65535") {
 		return "\n     The server's gateway could not reach your container: it is probably stopped or missing." +
-			"\n     The server's admin can start it: " + Prog + " update-server <docker host>" +
+			"\n     The server's admin can start it: " + Prog + " server update <docker host>" +
 			"\n     (or on that host: docker start rcc-<user>)"
 	}
 	return ""

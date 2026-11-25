@@ -372,11 +372,11 @@ func (s *session) openLog() *os.File {
 // connecting to the Docker host instead of the user's container.
 func (s *session) claudeMissing() error {
 	if s.facts["rccserver"] == "1" {
-		return errors.New("claude is missing inside the remote-cc container; update the server (update-server), or pass --claude PATH")
+		return errors.New("claude is missing inside the remote-cc container; update the server (server update), or pass --claude PATH")
 	}
 	return fmt.Errorf("claude was not found on %s (host %q).\n"+
 		"     If this is the Docker host of a remote-cc server, connect to your container instead:\n"+
-		"     use the alias that setup-server or join configured (e.g. <server>-cc).\n"+
+		"     use the alias that server setup or device join configured (e.g. <server>-cc).\n"+
 		"     Otherwise install Claude Code there or pass --claude PATH", s.cfg.Dest, s.facts["hostname"])
 }
 

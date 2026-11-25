@@ -63,7 +63,7 @@ load_server() {
     if [ -f "$DIR/compose.yml" ]; then
       echo "rcc: $DIR holds a single-container deployment, which is no longer supported; convert it with 'server migrate --user NAME'" >&2
     else
-      echo "rcc: no remote-cc server in $DIR (run setup-server first)" >&2
+      echo "rcc: no remote-cc server in $DIR (run server setup first)" >&2
     fi
     exit 3
   fi

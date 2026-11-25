@@ -64,7 +64,7 @@ for n in $(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true); do
   want="$DATA/egress/users/$n"
   [ "$(egress_src "rcc-$n")" = "$want" ] && continue
   [ -d "$DIR/users/$n" ] || continue
-  # .env first, even while busy: the next recreate (update-server) uses it.
+  # .env first, even while busy: the next recreate (server update) uses it.
   if ! grep -qxF "RCC_EGRESS_DIR=$want" "$DIR/users/$n/.env"; then
     sed -i '/^RCC_EGRESS_DIR=/d' "$DIR/users/$n/.env"; echo "RCC_EGRESS_DIR=$want" >> "$DIR/users/$n/.env"
   fi

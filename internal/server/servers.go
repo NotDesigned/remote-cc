@@ -14,8 +14,8 @@ import (
 )
 
 // Known is a server this machine administers: the Docker host as reached
-// for admin commands (setup-server, update-server, …). It is remembered so
-// that `update-server --all` can visit every one.
+// for admin commands (server setup, server update, …). It is remembered so
+// that `server update --all` can visit every one.
 type Known struct {
 	Dest       string   `json:"dest"`
 	Args       []string `json:"args,omitempty"` // ssh options given on the command line
@@ -75,7 +75,7 @@ func remember(c Config) {
 		err = saveKnown(append(ks, k))
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rcc: warning: could not remember this server for update-server --all: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: warning: could not remember this server for server update --all: %v\n", err)
 	}
 }
 
@@ -103,7 +103,7 @@ func ListKnown() error {
 		return err
 	}
 	if len(ks) == 0 {
-		fmt.Printf("no servers remembered yet; setup-server, update-server and server migrate add them\n")
+		fmt.Printf("no servers remembered yet; server setup, server update and server migrate add them\n")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -122,7 +122,7 @@ func UpdateAll(base Config, image string, force bool) error {
 		return err
 	}
 	if len(ks) == 0 {
-		return fmt.Errorf("no servers remembered yet: run `%s update-server <host>` once for each (setup-server and server migrate also remember them)", remote.Prog)
+		return fmt.Errorf("no servers remembered yet: run `%s server update SERVER` once for each (server setup and server migrate also remember them)", remote.Prog)
 	}
 	type outcome struct {
 		k   Known

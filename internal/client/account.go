@@ -125,7 +125,7 @@ func Account(cfg Config, action string, args []string) (int, error) {
 			if p != nil {
 				hint = "--rcb " + p.ID // rcb-* accounts are only reachable through --rcb
 			}
-			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for this account, run: %s token %s %s\n", remote.Prog, hint, s.cfg.Dest)
+			fmt.Fprintf(os.Stderr, "\nrcc: to use this token for this account, run: %s account token %s %s\n", remote.Prog, hint, s.cfg.Dest)
 		}
 		return code, err
 	case "token", "token-clear":
@@ -183,7 +183,7 @@ func readToken() (string, error) {
 	var b []byte
 	var err error
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
-		fmt.Fprint(os.Stderr, "Paste the token from `setup-token` (input hidden): ")
+		fmt.Fprint(os.Stderr, "Paste the token from `account setup-token` (input hidden): ")
 		b, err = term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr)
 	} else {

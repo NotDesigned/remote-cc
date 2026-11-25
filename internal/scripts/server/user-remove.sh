@@ -16,5 +16,5 @@ if [ -d "$DIR/users/$NAME" ]; then (cd "$DIR/users/$NAME" && docker compose down
 if [ "$PURGE" = 1 ]; then
   rm -rf "$DATA/users/$NAME"; echo "rcc: deleted $NAME's data (Claude logins, history)" >&2
 else
-  echo "rcc: kept $NAME's data in $DATA/users/$NAME (delete with --purge; 'user add' reuses it)" >&2
+  echo "rcc: kept $NAME's data in $DATA/users/$NAME (delete with --purge; 'server user add' reuses it)" >&2
 fi
