@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"os/exec"
+	"regexp"
 	"runtime"
 )
 
@@ -22,6 +24,21 @@ func rgCommand(args []string, paths []int) (*exec.Cmd, error) {
 		pre = append(pre, "--path-separator=/")
 	}
 	return exec.Command(rg, append(pre, args...)...), nil
+}
+
+// rgPathTextRe matches a path in rg --json output: "path":{"text":"…"}.
+var rgPathTextRe = regexp.MustCompile(`"path":\{"text":"(?:[^"\\]|\\.)*"`)
+
+// rgJSONPaths turns the separators in rg --json's path texts into /:
+// --path-separator does not apply to --json, which writes C:\\x\\y (a
+// Windows path has no \ of its own, so every escaped \ is a separator).
+func rgJSONPaths(b []byte) []byte {
+	if !bytes.Contains(b, []byte(`"path":{"text":"`)) {
+		return b
+	}
+	return rgPathTextRe.ReplaceAllFunc(b, func(m []byte) []byte {
+		return bytes.ReplaceAll(m, []byte(`\\`), []byte("/"))
+	})
 }
 
 // rgLocalArgs maps the path arguments that are B-form drive paths.

@@ -152,7 +152,7 @@ func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, er
 		}
 		cmd = r
 		if runtime.GOOS == "windows" {
-			dw := &driveWriter{w: stdout}
+			dw := &driveWriter{w: stdout, json: true}
 			stdout, flush = dw, dw.Flush
 		}
 		st.Cmd = strings.Join(st.Argv, " ") // for the log

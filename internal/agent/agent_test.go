@@ -214,3 +214,16 @@ func TestRgLocalArgs(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestRgJSONPathsOnWindows(t *testing.T) {
+	var out strings.Builder
+	d := &driveWriter{w: &out, json: true}
+	d.Write([]byte(`{"type":"match","data":{"path":{"text":"C:\\Users\\x\\sub\\a.go"},"lines":{"text":"s := \"a\\\\b\"\n"}}}` + "\n"))
+	d.Write([]byte(`{"type":"begin","data":{"path":{"text":".\\sub\\b.go"}}}` + "\n"))
+	d.Flush()
+	want := `{"type":"match","data":{"path":{"text":"/c/Users/x/sub/a.go"},"lines":{"text":"s := \"a\\\\b\"\n"}}}` + "\n" +
+		`{"type":"begin","data":{"path":{"text":"./sub/b.go"}}}` + "\n"
+	if out.String() != want {
+		t.Fatalf("%s", out.String())
+	}
+}
