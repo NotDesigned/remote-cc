@@ -1,4 +1,4 @@
-# docker compose up -d     (settings in .env next to this file; `rcc setup-server` writes both)
+# docker compose up -d     (settings in .env next to this file; `rcc server setup` writes both)
 services:
   remote-cc:
     image: ${RCC_IMAGE:-ghcr.io/notdesigned/remote-cc-server:latest}

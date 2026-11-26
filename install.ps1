@@ -87,5 +87,5 @@
     if (-not $gitBash) {
         Say "warning: Git Bash not found. Commands from Claude run in Git Bash on this machine: install Git for Windows (https://git-scm.com/download/win)"
     }
-    Say "next: $name setup-server user@your-server   (see https://github.com/$repo#readme)"
+    Say "next: $name server setup user@your-server   (see https://github.com/$repo#readme)"
 }

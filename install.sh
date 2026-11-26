@@ -85,4 +85,4 @@ esac
 
 command -v ssh >/dev/null 2>&1 || say "warning: no ssh client found; remote-cc needs one"
 command -v bash >/dev/null 2>&1 || say "warning: no bash found; commands from Claude run in bash on this machine"
-say "next: $name setup-server user@your-server   (see https://github.com/$repo#readme)"
+say "next: $name server setup user@your-server   (see https://github.com/$repo#readme)"
