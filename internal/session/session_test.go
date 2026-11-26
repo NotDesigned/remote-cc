@@ -492,3 +492,167 @@ func TestStatusLine(t *testing.T) {
 		t.Fatalf("got %q, want %q", out.String(), want)
 	}
 }
+
+// stalled is a connection that carries nothing while stalled (as TCP on a
+// lossy link while it retransmits), then carries on. Closing it ends the
+// stall, as closing ssh's pipes does.
+type stalled struct {
+	net.Conn
+	mu     sync.Mutex
+	cond   *sync.Cond
+	on     bool
+	closed bool
+}
+
+func (s *stalled) wait() {
+	s.mu.Lock()
+	for s.on && !s.closed {
+		s.cond.Wait()
+	}
+	s.mu.Unlock()
+}
+
+func (s *stalled) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	return s.Conn.Close()
+}
+
+func (s *stalled) set(on bool) {
+	s.mu.Lock()
+	s.on = on
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *stalled) Read(p []byte) (int, error) {
+	n, err := s.Conn.Read(p)
+	s.wait()
+	return n, err
+}
+
+func (s *stalled) Write(p []byte) (int, error) {
+	s.wait()
+	return s.Conn.Write(p)
+}
+
+// quietRun runs a client whose first connection can be stalled; later
+// connections fail while down is set.
+func quietRun(t *testing.T, down *atomic.Bool, reasons chan<- error) (*harness, *stalled, *io.PipeWriter, *syncBuffer) {
+	h, _ := newHarness(t, winchScript, time.Minute)
+	var first *stalled
+	connect := func(isFirst bool) (io.ReadWriteCloser, error) {
+		if !isFirst && down.Load() {
+			return nil, errors.New("network down")
+		}
+		c, err := h.connect(isFirst)
+		if err != nil || !isFirst {
+			return c, err
+		}
+		first = &stalled{Conn: c.(net.Conn)}
+		first.cond = sync.NewCond(&first.mu)
+		return first, nil
+	}
+	stdinR, stdinW := io.Pipe()
+	stderr := &syncBuffer{}
+	go Run(ClientConfig{
+		Token:        "tok",
+		Connect:      connect,
+		Files:        func(rw io.ReadWriteCloser) error { io.Copy(io.Discard, rw); return nil },
+		Commands:     echo,
+		Stdin:        stdinR,
+		Stdout:       &h.out,
+		Stderr:       stderr,
+		Terminal:     fakeTerm{Size{Rows: 24, Cols: 80}},
+		Grace:        time.Minute,
+		QuietAfter:   400 * time.Millisecond,
+		Reconnecting: func(err error) { reasons <- err },
+	})
+	h.waitOutput("ready")
+	return h, first, stdinW, stderr
+}
+
+// A quiet connection is kept while a new one is tried alongside: when the
+// new one cannot get through and the old one carries on, nothing shows.
+func TestQuietLinkCarriesOn(t *testing.T) {
+	var down atomic.Bool
+	down.Store(true)
+	reasons := make(chan error, 10)
+	h, first, stdinW, stderr := quietRun(t, &down, reasons)
+	mark := h.outputLen()
+	first.set(true)
+	go stdinW.Write([]byte("typed in the stall\n"))
+	time.Sleep(1500 * time.Millisecond)
+	first.set(false)
+	h.waitOutput("got:typed in the stall")
+	time.Sleep(300 * time.Millisecond)
+	if len(reasons) == 0 {
+		t.Fatal("no new connection was tried")
+	}
+	for len(reasons) > 0 {
+		if err := <-reasons; !errors.Is(err, ErrQuiet) {
+			t.Errorf("Reconnecting(%v): the quiet connection was given up", err)
+		}
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("status printed: %q", s)
+	}
+	if out := h.outputSince(mark); strings.Contains(out, "size=") {
+		t.Errorf("the terminal was resized: %q", out)
+	}
+	if h.dials != 1 {
+		t.Errorf("%d connections reached the daemon", h.dials)
+	}
+}
+
+// A quiet connection that stays quiet: the one tried alongside takes over,
+// and nothing shows either.
+func TestQuietLinkReplaced(t *testing.T) {
+	var down atomic.Bool
+	reasons := make(chan error, 10)
+	h, first, stdinW, stderr := quietRun(t, &down, reasons)
+	mark := h.outputLen()
+	first.set(true) // for good
+	start := time.Now()
+	go stdinW.Write([]byte("typed in the stall\n"))
+	h.waitOutput("got:typed in the stall")
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("took over after %v", d)
+	}
+	if err := <-reasons; !errors.Is(err, ErrQuiet) {
+		t.Errorf("Reconnecting(%v)", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if s := stderr.String(); s != "" {
+		t.Errorf("status printed: %q", s)
+	}
+	if out := h.outputSince(mark); strings.Contains(out, "size=") {
+		t.Errorf("the terminal was resized: %q", out)
+	}
+}
+
+// A quiet connection that lasts shows on the status line; once it carries
+// on, the status is erased and the interface redrawn (the height only).
+func TestLongQuietShowsStatus(t *testing.T) {
+	defer func(d time.Duration) { quietShowAfter = d }(quietShowAfter)
+	quietShowAfter = 300 * time.Millisecond
+	var down atomic.Bool
+	down.Store(true)
+	h, first, _, stderr := quietRun(t, &down, make(chan error, 10))
+	mark := h.outputLen()
+	first.set(true)
+	time.Sleep(1500 * time.Millisecond)
+	if s := stderr.String(); !strings.HasPrefix(s, "\rrcc: nothing heard") || strings.Contains(s, "\n") {
+		t.Fatalf("status %q", s)
+	}
+	first.set(false)
+	h.waitOutput("size=24 80")
+	if out := h.outputSince(mark); !strings.Contains(out, "size=23 80") {
+		t.Errorf("redraw: %q", out)
+	}
+	if s := stderr.String(); !strings.HasSuffix(s, "\r\x1b[K") || strings.Contains(s, "\n") {
+		t.Errorf("status not erased: %q", s)
+	}
+}

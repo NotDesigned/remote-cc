@@ -11,7 +11,9 @@
 // On a transport, frames are: type (1 byte) | length (4 bytes, big endian) |
 // payload. Both sides send a ping every PingEvery; a transport that has been
 // silent for DeadAfter is closed, so a half-open connection is noticed even
-// when the operating system does not report it.
+// when the operating system does not report it. DeadAfter is long, because a
+// lossy link can stall TCP for many seconds and then carry on: Silence lets
+// the client try a new transport alongside a quiet one long before that.
 package resume
 
 import (
@@ -46,6 +48,9 @@ const (
 	handshakeTO = 20 * time.Second
 )
 
+// DefaultDeadAfter is Options.DeadAfter's default.
+const DefaultDeadAfter = 45 * time.Second
+
 // ErrClosed is returned by Read, Write and Attach after Close.
 var ErrClosed = errors.New("resume: connection closed")
 
@@ -56,7 +61,12 @@ var ErrSilent = errors.New("resume: nothing heard from the other side")
 // Options tune a Conn. Zero values mean the defaults.
 type Options struct {
 	PingEvery time.Duration // default 5s
-	DeadAfter time.Duration // default 15s
+	// DeadAfter: a transport on which nothing was heard this long is
+	// closed (ErrSilent). Default 45s: a lossy link (5% loss, round trips
+	// up to a second) stalls TCP for 15 s and more while it retransmits
+	// with growing waits, and then carries on; the ssh connection carrying
+	// it must not give up sooner (see remote.Conn).
+	DeadAfter time.Duration
 	// ProbeWait: after Probe, a sleep of this computer (noticed as the wall
 	// clock running ahead of the monotonic one) or a stall of this process
 	// (an overloaded computer), the transport is given this long to answer
@@ -101,7 +111,7 @@ func New(opt Options) *Conn {
 		opt.PingEvery = 5 * time.Second
 	}
 	if opt.DeadAfter == 0 {
-		opt.DeadAfter = 15 * time.Second
+		opt.DeadAfter = DefaultDeadAfter
 	}
 	if opt.MaxUnacked == 0 {
 		opt.MaxUnacked = 8 << 20
@@ -430,6 +440,19 @@ func (c *Conn) Probe() {
 	if c.cur != nil {
 		c.probe(c.cur)
 	}
+}
+
+// Silence tells how long nothing has been heard on the current transport:
+// zero when none is attached, and while this side reads slowly (the other
+// side's frames wait unread).
+func (c *Conn) Silence() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a := c.cur
+	if a == nil || a.holding {
+		return 0
+	}
+	return max(c.now().Sub(a.lastRecv), 0)
 }
 
 // LastError tells why the last transport ended (ErrSilent: nothing heard).

@@ -25,16 +25,17 @@ func fakeSSH(t *testing.T) Target {
 }
 
 // A shared connection that is up but dead: the probe through it gets no
-// answer within MasterWait; the shared connection is ended and the probe
-// runs on a new one.
+// answer within MasterWait; the shared connection is retired ("-O stop":
+// sessions riding it go on, new calls connect afresh) and the probe runs on
+// a new one.
 func TestDeadMaster(t *testing.T) {
 	tg := fakeSSH(t)
 	dir := t.TempDir()
-	// "-O check" says the master is up; until "-O exit", commands hang.
+	// "-O check" says the master is up; until "-O stop", commands hang.
 	script := `#!/bin/sh
-for a; do last=$a; case $a in check) exit 0 ;; exit) touch "` + dir + `/exited"; exit 0 ;; esac; done
+for a; do last=$a; case $a in check) exit 0 ;; stop) touch "` + dir + `/retired"; exit 0 ;; esac; done
 # like ssh, which hands its stdout to the shared connection's process
-[ -e "` + dir + `/exited" ] || { sleep 30 & exec sleep 30; }
+[ -e "` + dir + `/retired" ] || { sleep 30 & exec sleep 30; }
 exec sh -c "$last"
 `
 	if err := os.WriteFile(tg.SSH, []byte(script), 0o755); err != nil {
@@ -62,8 +63,8 @@ exec sh -c "$last"
 	if f["a"] != "1" || time.Since(start) > 5*time.Second {
 		t.Fatalf("facts %v after %v", f, time.Since(start))
 	}
-	if _, err := os.Stat(filepath.Join(dir, "exited")); err != nil {
-		t.Fatal("the shared connection was not ended")
+	if _, err := os.Stat(filepath.Join(dir, "retired")); err != nil {
+		t.Fatal("the shared connection was not retired")
 	}
 }
 

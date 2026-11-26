@@ -138,6 +138,24 @@ func attachHello(link *resume.Conn, tr io.ReadWriteCloser, token string) (<-chan
 	return link.Attach(&helloReply{ReadWriteCloser: tr})
 }
 
+// sayHello says hello on a new connection and waits up to limit for the
+// answer: the connection is through to the daemon. The resume handshake is
+// next on the returned connection.
+func sayHello(tr io.ReadWriteCloser, token string, limit time.Duration) (io.ReadWriteCloser, error) {
+	h := &helloReply{ReadWriteCloser: tr}
+	t := time.AfterFunc(limit, func() { tr.Close() })
+	_, err := io.WriteString(tr, helloPrefix+token+"\n")
+	if err == nil {
+		err = h.answer()
+	}
+	t.Stop()
+	if err != nil {
+		tr.Close()
+		return nil, err
+	}
+	return h, nil
+}
+
 // helloReply reads the answer to the hello before the stream.
 type helloReply struct {
 	io.ReadWriteCloser
@@ -146,6 +164,14 @@ type helloReply struct {
 }
 
 func (h *helloReply) Read(p []byte) (int, error) {
+	if err := h.answer(); err != nil {
+		return 0, err
+	}
+	return h.ReadWriteCloser.Read(p)
+}
+
+// answer reads the answer to the hello, the first time.
+func (h *helloReply) answer() error {
 	if !h.answered {
 		h.answered = true
 		line, err := readLine(h.ReadWriteCloser, 256)
@@ -156,10 +182,7 @@ func (h *helloReply) Read(p []byte) (int, error) {
 			h.err = helloError(strings.TrimPrefix(line, "error "))
 		}
 	}
-	if h.err != nil {
-		return 0, h.err
-	}
-	return h.ReadWriteCloser.Read(p)
+	return h.err
 }
 
 // readLine reads one line byte by byte, so nothing after it is consumed

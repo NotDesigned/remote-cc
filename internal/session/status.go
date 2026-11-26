@@ -34,10 +34,15 @@ const statusShowAfter = time.Second
 func (s *statusLine) begin(after time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.msg, s.touched = "", false
+	// Still on the screen (a quiet connection, now lost): it stays, and
+	// shows the new message at once.
+	s.msg, s.touched = "", s.shown
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
+	}
+	if s.shown {
+		after = 0
 	}
 	s.showAt = time.Now().Add(after)
 	if after <= 0 {

@@ -376,10 +376,16 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 		Logf:     logger.Printf,
 		Reconnecting: func(reason error) {
 			// Nothing heard: the shared ssh connection most likely went
-			// down with the session's, and new ssh calls through it would
-			// wait for it until ssh gives up on it (15 s). Other reasons
-			// (the server side closed the connection) leave it alone.
-			if errors.Is(reason, resume.ErrSilent) {
+			// down with the session's (or is stalled with it), and new
+			// ssh calls through it would wait for it until ssh gives up
+			// on it. While the session's connection may yet carry on,
+			// the shared one is only retired: ending it would end that
+			// too. Other reasons (the server side closed the connection)
+			// leave it alone.
+			switch {
+			case errors.Is(reason, live.ErrQuiet):
+				s.conn.RetireMaster()
+			case errors.Is(reason, resume.ErrSilent):
 				s.conn.DropMaster()
 			}
 		},

@@ -159,9 +159,12 @@ func (c *Conn) args(tty bool, opts []string) []string {
 		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+c.ctl,
 			"-o", fmt.Sprintf("ControlPersist=%d", int(MasterPersist.Seconds())))
 	}
-	// A dropped network is noticed within 15s (sessions also have their own
-	// heartbeat, see internal/resume).
-	args = append(args, "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
+	// A dropped network is noticed within about 50s. Not sooner: on a lossy
+	// link TCP stalls for 15 s and more while it retransmits, and then
+	// carries on, and the session's connection rides the shared one.
+	// Sessions notice a quiet connection themselves and try a new one
+	// alongside (see internal/session, internal/resume).
+	args = append(args, "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=4")
 	if tty {
 		args = append(args, "-t")
 	} else {
@@ -214,9 +217,10 @@ esac`
 //
 // A shared ssh connection can be up but dead (its network went away while
 // this computer slept, or with a Wi-Fi switch): ssh would wait for it until
-// it gives up on it (15 s) and then fail. So through a shared connection,
-// the facts must come within MasterWait; otherwise the shared connection is
-// ended and the probe runs again on a new one.
+// it gives up on it (about 50 s) and then fail. So through a shared
+// connection, the facts must come within MasterWait; otherwise the shared
+// connection is retired (another session riding it, if only stalled, goes
+// on) and the probe runs again on a new one.
 func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
 	if c.masterUp {
 		f, h, err := c.factsHeld(script, MasterWait)
@@ -224,7 +228,7 @@ func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
 			return f, h, err
 		}
 		c.Logf("the shared ssh connection did not answer within %v; connecting afresh", MasterWait)
-		c.DropMaster()
+		c.RetireMaster()
 	}
 	return c.factsHeld(script, 0)
 }
@@ -388,8 +392,8 @@ func (p *Pipe) Close() error {
 
 // DropMaster ends this Conn's shared ssh connection, if one is up. Once a
 // session's connection has been lost, the shared one is most likely dead
-// too, and new ssh calls through it would hang until ssh notices (up to
-// 15s); without it they connect afresh (and become the new shared one).
+// too, and new ssh calls through it would hang until ssh notices (about
+// 50s); without it they connect afresh (and become the new shared one).
 func (c *Conn) DropMaster() {
 	if c.ctl == "" {
 		return
@@ -402,6 +406,27 @@ func (c *Conn) DropMaster() {
 	args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "exit", c.T.Dest)
 	exec.CommandContext(ctx, c.T.SSH, args...).Run()
 	// Whatever became of it, new ssh calls make a new one.
+	os.Remove(c.ctl)
+	c.masterUp = false
+}
+
+// RetireMaster keeps this Conn's shared ssh connection, if one is up, from
+// carrying new ssh calls, without ending those it carries: after a while
+// of silence it may be dead, or only stalled by a lossy link. New ssh calls
+// connect afresh (and become the new shared one); the old one ends once its
+// last session does.
+func (c *Conn) RetireMaster() {
+	if c.ctl == "" {
+		return
+	}
+	if _, err := os.Stat(c.ctl); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// The master answers this locally; it removes its socket.
+	args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "stop", c.T.Dest)
+	exec.CommandContext(ctx, c.T.SSH, args...).Run()
 	os.Remove(c.ctl)
 	c.masterUp = false
 }

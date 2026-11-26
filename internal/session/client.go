@@ -40,14 +40,35 @@ type ClientConfig struct {
 	// Backoff is the wait before each reconnect attempt; default none for
 	// the first, then 1s, 2s, 4s, 8s, then 10s.
 	Backoff func(attempt int) time.Duration
-	// Reconnecting is called once the connection is lost, before the first
-	// reconnect attempt, with the reason (resume.ErrSilent: nothing was
-	// heard, so the shared ssh connection is most likely dead too).
+	// Reconnecting is called before a new connection is tried, with the
+	// reason: ErrQuiet when nothing was heard for QuietAfter (the old
+	// connection stays and may yet carry on: the shared ssh connection must
+	// not be ended, only kept from carrying new ones), or why the connection
+	// was lost (resume.ErrSilent: nothing was heard for too long, so the
+	// shared ssh connection is most likely dead too).
 	Reconnecting func(reason error)
+	// QuietAfter: once nothing was heard for this long, a new connection is
+	// tried alongside the quiet one, and takes over once the daemon answers
+	// on it (default 15s; negative: never). The quiet one is given up only
+	// much later (resume.DefaultDeadAfter): on a lossy link TCP stalls for
+	// that long and then carries on.
+	QuietAfter time.Duration
 	// NetworkEvery is how often this computer's network addresses are
 	// checked for a change (default 2s; negative: never).
 	NetworkEvery time.Duration
 }
+
+// ErrQuiet: nothing was heard for a while (ClientConfig.QuietAfter).
+var ErrQuiet = errors.New("nothing heard for a while")
+
+// DefaultQuietAfter is ClientConfig.QuietAfter's default: three pings
+// missed. A lossy link stalls TCP about this long now and then; whichever of
+// the old connection and a new one gets through first carries on.
+const DefaultQuietAfter = 15 * time.Second
+
+// quietShowAfter: a quiet connection shows on the status line once it has
+// been quiet this long more (and neither it nor a new one is through).
+var quietShowAfter = 5 * time.Second
 
 // StartError: the first connection did not reach a session daemon (the
 // server-side start failed; its stderr says why).
@@ -82,6 +103,9 @@ func Run(cfg ClientConfig) (int, error) {
 	}
 	if cfg.NetworkEvery == 0 {
 		cfg.NetworkEvery = 2 * time.Second
+	}
+	if cfg.QuietAfter == 0 {
+		cfg.QuietAfter = DefaultQuietAfter
 	}
 	tr, err := cfg.Connect(true)
 	if err != nil {
@@ -222,9 +246,62 @@ func Run(cfg ClientConfig) (int, error) {
 		}
 	}()
 
+	// A new connection tried alongside a quiet one (see QuietAfter).
+	var (
+		early     chan attachResult
+		nextEarly time.Time
+		quietC    <-chan time.Time
+		quiet     bool // the status line is on for it
+	)
+	// quietOver ends the status of a quiet connection that is through
+	// again, or replaced.
+	quietOver := func() {
+		if quiet {
+			quiet = false
+			if status.end() {
+				pc.Write(tRedraw, nil)
+			}
+		}
+	}
+	if cfg.QuietAfter > 0 {
+		t := time.NewTicker(min(cfg.QuietAfter/4, time.Second))
+		defer t.Stop()
+		quietC = t.C
+	}
 	hangup := cfg.Hangup
 	for {
 		select {
+		case <-quietC:
+			q := link.Silence()
+			if q < cfg.QuietAfter {
+				quietOver()
+			}
+			if early != nil || time.Now().Before(nextEarly) {
+				break
+			}
+			if q >= cfg.QuietAfter {
+				if !quiet {
+					quiet = true
+					status.begin(quietShowAfter)
+					status.set("nothing heard from the server for a while; trying a new connection … (typing is kept)")
+				}
+				cfg.Logf("nothing heard for %v; trying a new connection alongside", q.Round(100*time.Millisecond))
+				if cfg.Reconnecting != nil {
+					cfg.Reconnecting(ErrQuiet)
+				}
+				early = make(chan attachResult, 1)
+				go func(ch chan<- attachResult) { ch <- dialAttach(cfg, link, true) }(early)
+			}
+		case r := <-early:
+			early = nil
+			if r.err != nil {
+				cfg.Logf("new connection alongside: %v", r.err)
+				nextEarly = time.Now().Add(5 * time.Second)
+				break
+			}
+			cfg.Logf("switched to the new connection")
+			done = r.done
+			quietOver()
 		case r := <-results:
 			// Tell the daemon (it waits for this), and let it arrive.
 			ts.Close()
@@ -238,7 +315,8 @@ func Run(cfg ClientConfig) (int, error) {
 			disconnected = true
 			mu.Unlock()
 			cfg.Logf("connection lost: %v", link.LastError())
-			next, err := reconnect(cfg, link, status, abort, hangup, netChanged)
+			next, err := reconnect(cfg, link, status, abort, hangup, netChanged, early)
+			early, quiet = nil, false
 			if err != nil {
 				return 1, err
 			}
@@ -259,10 +337,39 @@ func Run(cfg ClientConfig) (int, error) {
 	}
 }
 
+type attachResult struct {
+	done <-chan struct{}
+	err  error
+}
+
+// dialAttach connects anew and resumes link on the new connection. With
+// confirmed, the current connection is kept until the daemon has answered
+// the hello on the new one (it may yet carry on); otherwise the resume
+// handshake follows the hello at once, a round trip sooner.
+func dialAttach(cfg ClientConfig, link *resume.Conn, confirmed bool) attachResult {
+	tr, err := cfg.Connect(false)
+	if err != nil {
+		return attachResult{err: err}
+	}
+	// A frozen server may accept the connection and say nothing: the
+	// answer, and the resume handshake, are given 20s.
+	if confirmed {
+		h, err := sayHello(tr, cfg.Token, 20*time.Second)
+		if err != nil {
+			return attachResult{err: err}
+		}
+		done, err := link.Attach(h)
+		return attachResult{done, err}
+	}
+	done, err := attachHello(link, tr, cfg.Token)
+	return attachResult{done, err}
+}
+
 // reconnect attaches new connections until one resumes the stream. The
-// first attempt goes at once, and a network change skips the wait before
-// the next. The status line tells how it goes once the outage lasts.
-func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, hangup, netChanged <-chan struct{}) (<-chan struct{}, error) {
+// first attempt goes at once (or is the one already under way, pending),
+// and a network change skips the wait before the next. The status line
+// tells how it goes once the outage lasts.
+func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, hangup, netChanged <-chan struct{}, pending <-chan attachResult) (<-chan struct{}, error) {
 	start := time.Now()
 	giveUp := start.Add(cfg.Grace + time.Minute)
 	const hint = " … (typing is kept; Ctrl-C ends the session)"
@@ -272,15 +379,11 @@ func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, h
 		status.final("gave up reconnecting")
 		return nil, fmt.Errorf("gave up reconnecting; the session on the server ends by itself within %v", cfg.Grace)
 	}
-	if cfg.Reconnecting != nil {
+	if cfg.Reconnecting != nil && pending == nil {
 		cfg.Reconnecting(link.LastError())
 	}
-	type result struct {
-		done <-chan struct{}
-		err  error
-	}
 	for attempt := 0; ; attempt++ {
-		if wait := cfg.Backoff(attempt); wait > 0 {
+		if wait := cfg.Backoff(attempt); wait > 0 && pending == nil {
 			select {
 			case <-abort:
 				return gaveUp()
@@ -294,19 +397,14 @@ func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, h
 			status.set(fmt.Sprintf("connection lost %v ago; reconnecting (attempt %d)%s",
 				time.Since(start).Round(time.Second), attempt+1, hint))
 		}
-		res := make(chan result, 1)
-		go func() {
-			tr, err := cfg.Connect(false)
-			if err != nil {
-				res <- result{err: err}
-				return
-			}
-			// A frozen server may accept the connection and say nothing:
-			// the resume handshake gives up after 20s.
-			done, err := attachHello(link, tr, cfg.Token)
-			res <- result{done, err}
-		}()
-		var r result
+		res := pending
+		pending = nil
+		if res == nil {
+			ch := make(chan attachResult, 1)
+			go func() { ch <- dialAttach(cfg, link, false) }()
+			res = ch
+		}
+		var r attachResult
 		select {
 		case r = <-res:
 		case <-abort: // the attempt goes on; Run's end closes link

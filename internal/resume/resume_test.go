@@ -190,3 +190,84 @@ func random(n int) []byte {
 	rand.Read(b)
 	return b
 }
+
+// pausable is a transport whose writes wait while paused: to the other
+// side it goes silent, as TCP does while it retransmits on a lossy link.
+type pausable struct {
+	net.Conn
+	mu     sync.Mutex
+	cond   *sync.Cond
+	paused bool
+}
+
+func newPausable(c net.Conn) *pausable {
+	p := &pausable{Conn: c}
+	p.cond = sync.NewCond(&p.mu)
+	return p
+}
+
+func (p *pausable) set(paused bool) {
+	p.mu.Lock()
+	p.paused = paused
+	p.cond.Broadcast()
+	p.mu.Unlock()
+}
+
+func (p *pausable) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	for p.paused {
+		p.cond.Wait()
+	}
+	p.mu.Unlock()
+	return p.Conn.Write(b)
+}
+
+// A long stall short of DeadAfter: Silence tells how long it has lasted,
+// the transport stays, and the stream carries on once the stall ends.
+func TestStallBelowDeadAfter(t *testing.T) {
+	opt := Options{PingEvery: 50 * time.Millisecond, DeadAfter: 2 * time.Second}
+	a, b := New(opt), New(opt)
+	defer a.Close()
+	defer b.Close()
+	if a.Silence() != 0 {
+		t.Fatal("silence without a transport")
+	}
+	x, y := net.Pipe()
+	py := newPausable(y)
+	errs := make(chan error, 1)
+	go func() { _, err := b.Attach(py); errs <- err }()
+	done, err := a.Attach(x)
+	if err != nil || <-errs != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if s := a.Silence(); s > 150*time.Millisecond {
+		t.Fatalf("silence %v while pings arrive", s)
+	}
+	py.set(true)
+	b.Write([]byte("after the stall"))
+	time.Sleep(time.Second)
+	if s := a.Silence(); s < 800*time.Millisecond {
+		t.Fatalf("silence %v after a 1 s stall", s)
+	}
+	select {
+	case <-done:
+		t.Fatalf("a stall short of DeadAfter ended the transport: %v", a.LastError())
+	default:
+	}
+	py.set(false)
+	buf := make([]byte, len("after the stall"))
+	if _, err := io.ReadFull(a, buf); err != nil || string(buf) != "after the stall" {
+		t.Fatalf("%q %v", buf, err)
+	}
+	if s := a.Silence(); s > 150*time.Millisecond {
+		t.Fatalf("silence %v after the stall", s)
+	}
+}
+
+func TestDefaultDeadAfter(t *testing.T) {
+	// Long enough to sit out a lossy link's TCP stalls.
+	if c := New(Options{}); c.opt.DeadAfter != DefaultDeadAfter || DefaultDeadAfter < 30*time.Second {
+		t.Fatalf("DeadAfter %v", c.opt.DeadAfter)
+	}
+}
