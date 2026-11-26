@@ -4,6 +4,24 @@
 
 0.6.0 及更早的条目是 2026-11-25 根据 git 标签和提交说明补写的；那时的命令名是旧名字，按原样写出。
 
+## 未发布
+
+### 新增
+
+无
+
+### 变更
+
+- Glob、Grep 搜索项目目录时改用电脑上的 ripgrep，在电脑上搜索：以前容器里的 rg 经 sshfs 逐个目录、逐个文件读，每次都要一个网络往返。2000 个文件的项目，网络往返 100 ms 时，一次 Grep 从 63 秒降到 0.11 秒，一次 Glob 从 24 秒降到 0.11 秒（往返 30 ms 时从 15 秒、5 秒降到 0.04 秒）。项目目录以外的搜索、单个文件的搜索仍在容器里执行；电脑上没有 `rg` 时整个会话都在容器里搜索，结果不变，只是慢。不在 git 仓库里时的 `@` 文件补全也一样变快。Claude Code 原生版默认不提供这两个工具（用 Bash 里的 `grep`、`find`，本来就在电脑上执行），需要时在 `--` 后加 `--allowedTools Glob,Grep`。详见 [docs/architecture.md](docs/architecture.md#命令通道)。
+
+### 移除
+
+无
+
+### 升级步骤
+
+- 在每台电脑上 `remote-cc update`，并建议装上 ripgrep（`brew install ripgrep`、`apt install ripgrep`、`winget install BurntSushi.ripgrep.MSVC`）。服务器不用更新。
+
 ## 0.8.2（2026-11-27）
 
 ### 新增

@@ -11,7 +11,8 @@ Claude Code 的工具分两类，所以只替换 shell 不够：
 | 工具 | 实际做什么 | 怎样落到电脑上 |
 | --- | --- | --- |
 | Bash | 起一个 shell 进程执行命令 | 命令通道：经 `CLAUDE_CODE_SHELL_PREFIX` 转发到电脑 |
-| Read、Write、Edit、Glob、Grep | 在 Claude Code 进程里直接读写文件 | 文件通道：电脑上的项目目录挂载到容器里 |
+| Read、Write、Edit | 在 Claude Code 进程里直接读写文件 | 文件通道：电脑上的项目目录挂载到容器里 |
+| Glob、Grep | 起一个 ripgrep（`rg`）进程遍历、搜索文件 | 命令通道：搜索项目目录的 `rg` 在电脑上执行（见下文 **rg**） |
 
 文件通道把项目目录挂载到容器里**相同的绝对路径**：容器里的 `/home/me/proj/src/a.go` 和电脑上的是同一个文件，Claude 写在命令里的路径和 cwd 在两边都成立，不需要任何路径翻译（Windows 上 Git Bash 形式的 `/c/…` 除外，见下文）。
 
@@ -63,6 +64,13 @@ Claude Code 支持环境变量 `CLAUDE_CODE_SHELL_PREFIX`：设置后，它把�
 电脑上用 `bash -c` 执行（不加 `-l`），直接继承启动 remote-cc 时的环境。Windows 上用 Git for Windows 的 bash，避开 `System32\bash.exe`（那是 WSL 的启动器）；命令有自己的隐藏控制台，并先切换到 UTF-8 代码页。
 
 **git**：Claude Code 自己调用 git 时不经过 `CLAUDE_CODE_SHELL_PREFIX`。会话的 PATH 最前面放一个 `git`，它是 `rcc-shim` 的链接：调用作用在项目目录内（考虑 `-C`、`--git-dir`、`--work-tree`）时，经命令通道把参数数组直接交给电脑上的 git，不经过 shell；作用在项目目录外时执行容器自己的 git。Windows 上双向转换 `/c/x` 和 `C:/x` 形式的路径。`--remote-git` 关闭这一层。
+
+**rg**：Claude Code 的 Glob、Grep 工具和 `@` 文件补全（不在 git 仓库里时）起 ripgrep 遍历目录；经 sshfs，每个目录、每个文件都要一个网络往返，中等大小的仓库要几十秒。启动脚本设置 `USE_BUILTIN_RIPGREP=0`，让 Claude Code 从 PATH 取 `rg`，并在 PATH 最前面放一个 `rg`，它也是 `rcc-shim` 的链接（`internal/shim/rg.go`）：
+
+- 它解析 rg 的选项，找出要搜索的路径。所有路径都在项目目录内、cwd 也在项目目录内（或者路径全是绝对路径）时，经命令通道把参数数组原样交给电脑上的 `rg`，在同一个 cwd 里执行，stdout、stderr 和退出码原样传回。两边路径相同，所以输出和在容器里搜索一字不差。电脑上的 rg 加 `--no-config`，不受电脑上 `RIPGREP_CONFIG_PATH` 的影响（Claude Code 自带的 rg 也这样运行）。Windows 上路径参数转换成 `C:/x` 形式，并加 `--path-separator=/`，输出里的路径再转回 `/c/x`。
+- Claude Code 在 Linux 上先打开要搜索的目录，以 `/proc/self/fd/<n>` 为 cwd、`.` 为目标启动 rg；shim 看到的 cwd 是这个目录的真实路径。搜索单个文件时，Claude Code 把文件作为文件描述符 3 交给 rg（目标 `/proc/self/fd/3`），这种搜索和其余情况都在容器里执行：路径在项目目录外、读 stdin（`-`）、`-f`/`--file`、`--pre`、`--ignore-file`、没有路径参数（如 `--version`）。容器里用 Claude Code 原生版自带的 rg（以 `rg` 为 argv0 运行 claude 本身，和 Claude Code 自己的做法相同），没有时用启动时 PATH 里的 `rg`（`RCC_REAL_RG`）。
+- 电脑上没有 `rg`，或者连不上电脑、命令服务回答错误（在输出任何内容之前）时，同一个搜索改在容器里执行；没有 `rg` 这一点记在运行目录里，这个会话里之后的搜索不再先问电脑。
+- Claude Code 原生版默认不提供 Glob、Grep 工具，用 Bash 里的 `grep`、`find` 搜索；这些命令本来就在电脑上执行。用 `--allowedTools` 或 `--tools` 写明 Glob、Grep 时才有这两个工具。
 
 **进程清理**：会话结束时，电脑上由 remote-cc 启动的所有进程都要结束，即使 remote-cc 被 `kill -9`。Windows 上 remote-cc 启动时把自己放进一个带 `KILL_ON_JOB_CLOSE` 的 Job，之后启动的进程都继承它；Unix 上 remote-cc 派生一个看门狗进程，经一条只有 remote-cc 持有写端的管道登记每个进程组，管道一关闭就先 TERM、1 秒后 KILL，再删除临时目录。命令进程与用户的终端隔离（Unix 上 `setsid`，Windows 上 `CREATE_NO_WINDOW`）。
 
@@ -124,7 +132,7 @@ rcc-egress ◄── 每个服务器用户自己的 socket ── rcc-<用户名
 ## 已知限制
 
 - 项目目录里指向目录外的链接，在容器里解析到容器自己的文件系统。
-- 大仓库里 Glob、Grep 经 sshfs 遍历会比较慢。
+- 电脑上没有 `rg` 时，Glob、Grep 在容器里经 sshfs 遍历，大仓库里会很慢。电脑上的 rg 版本太旧、不认识 Claude Code 用的选项时，搜索报错而不是改在容器里执行。
 - 断线超过 10 分钟，会话结束。电脑上的 remote-cc 自己退出后（比如关掉了终端），不能再接回服务器上仍在运行的会话。
 - claude 在容器里用的是非登录 ssh 会话的环境，只写在 `.bashrc` 里的变量读不到。
 
