@@ -83,7 +83,9 @@ rm -f "$proj/survived.txt"
 ( sleep 2; pkill -KILL -f '^ssh: .*/rcc/cm/[0-9a-f]+ \[mux\]' ) &
 tty_run "cd '$proj' && remote-cc --claude /usr/local/bin/fake-claude-slow $alias" | tee /tmp/drop.out
 wait
-grep -q "connection lost" /tmp/drop.out || fail "the dropped connection went unnoticed"
+# A quick reconnect prints nothing on the terminal; the session log has it.
+grep -q "connection lost" ~/.cache/rcc/last.log || fail "the dropped connection went unnoticed"
+grep -q "reconnected after" ~/.cache/rcc/last.log || fail "no reconnect"
 [ "$(cat "$proj/survived.txt")" = survived ] || fail "the command was lost in the reconnect"
 [ "$(sudo docker exec rcc-owner sh -c 'ls /root/.cache/rcc/run | wc -l')" = 0 ] || fail "the session left its run directory"
 
