@@ -349,7 +349,7 @@ func Main(args []string, version string) int {
 	}
 	prog := strings.TrimSuffix(filepath.Base(args[0]), ".exe")
 	switch prog {
-	case "rcc-shim", "git": // a development build uploaded as the shim (bin/git too)
+	case "rcc-shim", "git", "rg": // a development build uploaded as the shim (bin/git, rg/rg too)
 		return shimcmd.Main(args)
 	}
 	remote.Prog = prog

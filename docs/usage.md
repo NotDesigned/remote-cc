@@ -29,6 +29,7 @@ remote-cc -v <服务器>-cc                         # 显示过程；-vv、-vvv�
 ```
 
 - Claude Code 的 Bash 命令在你的电脑上执行，用的是电脑上的 shell 和环境；Read、Edit、Glob、Grep 等文件工具读写的是电脑上的项目目录。项目目录以外的路径指向容器里的文件。
+- Glob、Grep 搜索项目目录时，用电脑上的 ripgrep（`rg`）在电脑上搜索，和本地一样快；电脑上没有 `rg` 时改在容器里经网络逐个读文件，大仓库要几十秒。所以建议在电脑上装 ripgrep（`brew install ripgrep`、`apt install ripgrep`、`winget install BurntSushi.ripgrep.MSVC`）。Claude Code 原生版默认不提供这两个工具（它用 Bash 里的 `grep`、`find`，同样在电脑上执行），需要时在 `--` 后加 `--allowedTools Glob,Grep`。
 - remote-cc 会给 Claude 追加一段说明，告诉它命令在哪台电脑、什么系统上执行，以及项目目录内外的文件分别在哪里。`--no-prompt` 关闭这段说明；你自己传了 `--append-system-prompt-file`，或者 `--` 后第一个参数是 `remote-control`、`mcp` 这类子命令时，remote-cc 不追加。
 - 容器里是 root。remote-cc 默认给 claude 设置 `IS_SANDBOX=1`，所以 `--dangerously-skip-permissions` 可用；`--no-is-sandbox` 关闭。
 - Windows 上命令在 Git for Windows 的 bash 里执行。remote-cc 启动前会先在电脑的 shell 里试跑一条命令，失败就停下并显示原因；可以用环境变量 `RCC_SHELL` 指定 bash 的路径。

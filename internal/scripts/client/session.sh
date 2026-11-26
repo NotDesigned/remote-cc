@@ -36,6 +36,9 @@ shim="$CACHE/shims/$SHIM_SHA/rcc-shim"
 # (see shim.Git); everything else falls through to the server's git.
 mkdir -p "$CACHE/shims/$SHIM_SHA/bin"
 ln -sf ../rcc-shim "$CACHE/shims/$SHIM_SHA/bin/git"
+# rg/rg: Claude Code's searches of the project run there too (see shim.Rg).
+mkdir -p "$CACHE/shims/$SHIM_SHA/rg"
+ln -sf ../rcc-shim "$CACHE/shims/$SHIM_SHA/rg/rg"
 touch "$CACHE/shims/$SHIM_SHA"
 find "$CACHE/shims" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 

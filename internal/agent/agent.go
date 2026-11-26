@@ -144,7 +144,19 @@ func (a *Agent) run(c *proto.Conn, st *proto.Start, dir string) (*proto.Exit, er
 	var cmd *exec.Cmd
 	var flush func() error
 	stdout := io.Writer(proto.ChunkWriter{C: c, T: proto.TStdout})
-	if len(st.Argv) > 0 {
+	if len(st.Argv) > 0 && st.Argv[0] == "rg" {
+		r, err := rgCommand(st.Argv[1:], st.Paths)
+		if err != nil {
+			// The shim then searches on the server instead.
+			return nil, errors.New(proto.RgMissing)
+		}
+		cmd = r
+		if runtime.GOOS == "windows" {
+			dw := &driveWriter{w: stdout, json: true}
+			stdout, flush = dw, dw.Flush
+		}
+		st.Cmd = strings.Join(st.Argv, " ") // for the log
+	} else if len(st.Argv) > 0 {
 		if st.Argv[0] != "git" {
 			return nil, fmt.Errorf("cannot run %q directly", st.Argv[0])
 		}

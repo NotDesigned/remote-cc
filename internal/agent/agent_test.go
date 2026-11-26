@@ -163,3 +163,67 @@ func TestForwardedGit(t *testing.T) {
 		t.Fatal("git exit code lost")
 	}
 }
+
+func TestForwardedRg(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("no rg")
+	}
+	addr := startAgent(t)
+	local, rdir := remoteDir(t)
+	os.MkdirAll(filepath.Join(local, "sub", "deep"), 0o755)
+	os.WriteFile(filepath.Join(local, "sub", "deep", "a.go"), []byte("package a\nfunc Hello() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(local, "b.txt"), []byte("nothing\n"), 0o644)
+	// A config that would change the output Claude Code parses.
+	cfg := filepath.Join(t.TempDir(), "rgrc")
+	os.WriteFile(cfg, []byte("--vimgrep\n"), 0o644)
+	t.Setenv("RIPGREP_CONFIG_PATH", cfg)
+	rg := func(dir string, paths []int, args ...string) result {
+		return call(t, addr, proto.Start{Cwd: dir, Argv: append([]string{"rg"}, args...), Paths: paths})
+	}
+
+	// Grep in Claude Code's relative form: cwd is the search directory.
+	r := rg(rdir, []int{7}, "--hidden", "--glob", "!.svn", "--max-columns", "500", "-l", "Hello", ".")
+	if r.failure != "" || r.exit.Code != 0 || r.out != "./sub/deep/a.go\n" {
+		t.Fatalf("failure=%q exit=%+v stdout=%q stderr=%q", r.failure, r.exit, r.out, r.errOut)
+	}
+	// Absolute targets come back in B's form, with / between parts.
+	r = rg("/", []int{4}, "--files", "--null", "--glob", "*.go", rdir)
+	if want := rdir + "/sub/deep/a.go\x00"; r.exit.Code != 0 || r.out != want {
+		t.Fatalf("exit=%+v stdout=%q, want %q (stderr %q)", r.exit, r.out, want, r.errOut)
+	}
+	r = rg(rdir, []int{2}, "--json", "Hello", rdir+"/sub")
+	if r.exit.Code != 0 || !strings.Contains(r.out, `"text":"`+rdir+`/sub/deep/a.go"`) {
+		t.Fatalf("exit=%+v stdout=%q", r.exit, r.out)
+	}
+	// No match: exit code 1, as rg's.
+	if r = rg(rdir, []int{2}, "-l", "nomatch", "."); r.exit.Code != 1 || r.out != "" {
+		t.Fatalf("exit=%+v stdout=%q", r.exit, r.out)
+	}
+
+	// No rg here: the agent says so, and the shim searches on the server.
+	t.Setenv("PATH", "")
+	if r = rg(rdir, []int{2}, "-l", "Hello", "."); r.failure != "rcc: "+proto.RgMissing {
+		t.Fatalf("failure=%q exit=%+v", r.failure, r.exit)
+	}
+}
+
+func TestRgLocalArgs(t *testing.T) {
+	got := rgLocalArgs([]string{"--glob", "/c/x", "/d/pat", "/c/Users/p", "/e"}, []int{3, 4})
+	want := []string{"--glob", "/c/x", "/d/pat", "C:/Users/p", "E:/"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestRgJSONPathsOnWindows(t *testing.T) {
+	var out strings.Builder
+	d := &driveWriter{w: &out, json: true}
+	d.Write([]byte(`{"type":"match","data":{"path":{"text":"C:\\Users\\x\\sub\\a.go"},"lines":{"text":"s := \"a\\\\b\"\n"}}}` + "\n"))
+	d.Write([]byte(`{"type":"begin","data":{"path":{"text":".\\sub\\b.go"}}}` + "\n"))
+	d.Flush()
+	want := `{"type":"match","data":{"path":{"text":"/c/Users/x/sub/a.go"},"lines":{"text":"s := \"a\\\\b\"\n"}}}` + "\n" +
+		`{"type":"begin","data":{"path":{"text":"./sub/b.go"}}}` + "\n"
+	if out.String() != want {
+		t.Fatalf("%s", out.String())
+	}
+}

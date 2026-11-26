@@ -24,10 +24,12 @@ jobs:
         run: for os in linux darwin windows; do GOOS=$os go vet ./...; done
       - name: docs check (docs/documentation.md, principle 8)
         run: go test ./internal/docs
+      - name: ripgrep (forwarded searches)
+        run: command -v rg || sudo apt-get install -y -qq ripgrep
       - run: go test ./...
 
   # The local side on real Windows (Git Bash, job objects) and macOS: the
-  # agent runs Claude-style commands and forwarded git calls.
+  # agent runs Claude-style commands and forwarded git calls and searches.
   local-side:
     strategy:
       fail-fast: false
@@ -39,6 +41,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: ripgrep (forwarded searches)
+        shell: bash
+        run: |
+          command -v rg && exit 0
+          if [ "$RUNNER_OS" = macOS ]; then brew install ripgrep; else choco install ripgrep -y --no-progress; fi
       - run: go test -v ./internal/agent ./internal/procjob ./internal/pathmap ./internal/shim ./internal/cli
 
   shellcheck:

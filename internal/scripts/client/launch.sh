@@ -7,6 +7,9 @@
 pid=$(cat "$RUN/pid")
 RCC_TOKEN=$(cat "$RUN/token")
 export RCC_SOCK="unix:$RUN/s" RCC_TOKEN CLAUDE_CODE_SHELL_PREFIX="$CACHE/shims/$SHIM_SHA/rcc-shim"
+# Grep and Glob take rg from PATH: rg/rg searches the project on the computer.
+RCC_REAL_RG=$(command -v rg || true)
+export RCC_ROOT="$R" RCC_REAL_RG USE_BUILTIN_RIPGREP=0 PATH="$CACHE/shims/$SHIM_SHA/rg:$PATH"
 if [ "${LOCAL_GIT:-1}" = 1 ]; then
   RCC_REAL_GIT=$(command -v git || true)
   export RCC_ROOT="$R" RCC_REAL_GIT PATH="$CACHE/shims/$SHIM_SHA/bin:$PATH"

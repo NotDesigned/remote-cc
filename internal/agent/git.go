@@ -65,16 +65,25 @@ func toPosixDrives(b []byte) []byte {
 }
 
 // driveWriter applies toPosixDrives line by line (NUL counts as a line end,
-// for -z output) and passes the rest through.
+// for -z output) and passes the rest through. json also turns the \ in rg
+// --json's path texts into /.
 type driveWriter struct {
-	w   io.Writer
-	buf []byte
+	w    io.Writer
+	buf  []byte
+	json bool
+}
+
+func (d *driveWriter) convert(b []byte) []byte {
+	if d.json {
+		b = rgJSONPaths(b)
+	}
+	return toPosixDrives(b)
 }
 
 func (d *driveWriter) Write(p []byte) (int, error) {
 	d.buf = append(d.buf, p...)
 	if i := bytes.LastIndexAny(d.buf, "\n\x00"); i >= 0 {
-		if _, err := d.w.Write(toPosixDrives(d.buf[:i+1])); err != nil {
+		if _, err := d.w.Write(d.convert(d.buf[:i+1])); err != nil {
 			return 0, err
 		}
 		d.buf = append(d.buf[:0], d.buf[i+1:]...)
@@ -93,7 +102,7 @@ func (d *driveWriter) Flush() error {
 	if len(d.buf) == 0 {
 		return nil
 	}
-	_, err := d.w.Write(toPosixDrives(d.buf))
+	_, err := d.w.Write(d.convert(d.buf))
 	d.buf = nil
 	return err
 }

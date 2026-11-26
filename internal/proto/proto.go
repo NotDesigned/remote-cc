@@ -45,9 +45,17 @@ type Start struct {
 	// return its trimmed contents in Exit.Cwd.
 	CaptureCwd bool `json:"captureCwd,omitempty"`
 	// Argv, when set, runs that program directly instead of Cmd. Only
-	// ["git", …]: Claude Code's own git calls on the project (see shim.Git).
+	// ["git", …]: Claude Code's own git calls on the project (see shim.Git),
+	// and ["rg", …]: its searches of the project (see shim.Rg).
 	Argv []string `json:"argv,omitempty"`
+	// Paths are the indexes in Argv[1:] of the arguments that are file
+	// paths (rg only; mapped to the local form on Windows).
+	Paths []int `json:"paths,omitempty"`
 }
+
+// RgMissing is the agent's error when an rg Argv cannot run because the
+// local machine has no rg; the shim then searches on B.
+const RgMissing = "rg is not installed on the local machine"
 
 // Signal names are portable ("INT", "TERM", "HUP", "KILL").
 type Signal struct {
