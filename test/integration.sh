@@ -22,7 +22,7 @@ expect_fail() { if "$@"; then fail "should have failed: $*"; fi; }
 tty_run() { script -qefc "$*" /dev/null; }
 
 step "prerequisites"
-sudo apt-get install -y -qq openssh-server >/dev/null
+sudo apt-get install -y -qq openssh-server ripgrep >/dev/null
 sudo systemctl start ssh 2>/dev/null || sudo service ssh start
 chmod 755 "$HOME"
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -87,11 +87,12 @@ grep -q "connection lost" /tmp/drop.out || fail "the dropped connection went unn
 [ "$(cat "$proj/survived.txt")" = survived ] || fail "the command was lost in the reconnect"
 [ "$(sudo docker exec rcc-owner sh -c 'ls /root/.cache/rcc/run | wc -l')" = 0 ] || fail "the session left its run directory"
 
-step "real Claude Code (mock API): Bash tool, cwd, --worktree through local git"
+step "real Claude Code (mock API): Bash tool, cwd, --worktree through local git, Grep through local rg"
 gwip=$(sudo docker network inspect remote-cc -f '{{(index .IPAM.Config 0).Gateway}}')
 rm -f /tmp/mock-results
 python3 "$TESTDIR/mockapi.py" --listen "$gwip:8765" --log /tmp/mock-results \
   --command 'uname -n; pwd' --command 'mkdir -p sub && cd sub && git rev-parse --abbrev-ref HEAD' --command pwd \
+  --command 'echo rcc-needle > found.txt' --tool 'Grep {"pattern": "rcc-needl[e]"}' \
   > /tmp/mockapi.log 2>&1 &
 mock=$!
 printf '#!/bin/sh\nexport ANTHROPIC_BASE_URL=http://%s:8765 ANTHROPIC_API_KEY=sk-ant-test CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\nexec claude "$@"\n' "$gwip" > /tmp/claude-mock
@@ -99,7 +100,7 @@ chmod 755 /tmp/claude-mock
 sudo docker cp /tmp/claude-mock rcc-owner:/usr/local/bin/claude-mock
 repo=$HOME/repo
 mkdir -p "$repo" && git -C "$repo" init -q && git -C "$repo" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
-tty_run "cd '$repo' && remote-cc --claude /usr/local/bin/claude-mock $alias -- -w wt1 -p go --dangerously-skip-permissions"
+tty_run "cd '$repo' && remote-cc --claude /usr/local/bin/claude-mock $alias -- -w wt1 -p go --dangerously-skip-permissions --allowedTools Grep"
 kill "$mock" 2>/dev/null || true
 cat /tmp/mock-results
 wt="$repo/.claude/worktrees/wt1"
@@ -111,6 +112,9 @@ case "$r2" in *worktree-wt1*) ;; *) fail "git in the worktree: $r2" ;; esac
 case "$r3" in *"$wt/sub"*) ;; *) fail "cwd not kept between commands: $r3" ;; esac
 git -C "$repo" worktree list | grep -q "$wt" || fail "worktree not created on this machine"
 grep -q "cmd=git " ~/.cache/rcc/last.log || fail "Claude Code's git calls did not run here"
+r5=$(sed -n 5p /tmp/mock-results)
+case "$r5" in *'"is_error": false'*found.txt*) ;; *) fail "Grep tool: $r5" ;; esac
+grep -q "cmd=rg .*rcc-needl" ~/.cache/rcc/last.log || fail "Claude Code's Grep did not run here"
 
 step "server user add: invite, device join on another machine"
 inv=$(remote-cc server user add "$ADMIN" alice | grep '^rcc1\.')
