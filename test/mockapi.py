@@ -2,12 +2,14 @@
 """A stand-in for the Anthropic Messages API, for end-to-end tests of real
 Claude Code without an account.
 
-A request whose tools include Bash gets Bash tool calls running each COMMAND
-in turn; each result that comes back is appended to LOG (one JSON line), and
-after the last one the reply is the text "DONE". Every other request (titles,
-summaries, ...) gets a short text reply.
+A request whose tools include Bash gets tool calls in turn: a Bash call
+running each COMMAND, and a call of tool NAME with the JSON input for each
+--tool 'NAME JSON', in the order given. Each result that comes back is
+appended to LOG (one JSON line), and after the last one the reply is the
+text "DONE". Every other request (titles, summaries, ...) gets a short text
+reply.
 
-  mockapi.py --listen 0.0.0.0:8765 --command 'uname -n' --command pwd --log /tmp/results
+  mockapi.py --listen 0.0.0.0:8765 --command 'uname -n' --tool 'Grep {"pattern": "x"}' --log /tmp/results
 """
 import argparse
 import json
@@ -16,9 +18,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--listen", default="127.0.0.1:8765")
-ap.add_argument("--command", action="append", required=True)
+ap.add_argument("--command", dest="calls", action="append",
+                type=lambda c: ("Bash", {"command": c, "description": "mock test command"}))
+ap.add_argument("--tool", dest="calls", action="append",
+                type=lambda t: (t.split(" ", 1)[0], json.loads(t.split(" ", 1)[1])))
 ap.add_argument("--log", required=True)
 args = ap.parse_args()
+if not args.calls:
+    ap.error("give at least one --command or --tool")
 
 
 def tool_results(messages):
@@ -44,9 +51,9 @@ def reply_for(req):
         with open(args.log, "a") as f:
             f.write(json.dumps(results[-1]) + "\n")
     n = len(results)
-    if n < len(args.command):
-        return [{"type": "tool_use", "id": f"toolu_mock_{n + 1}", "name": "Bash",
-                 "input": {"command": args.command[n], "description": "mock test command"}}], "tool_use"
+    if n < len(args.calls):
+        name, inp = args.calls[n]
+        return [{"type": "tool_use", "id": f"toolu_mock_{n + 1}", "name": name, "input": inp}], "tool_use"
     return [{"type": "text", "text": "DONE"}], "end_turn"
 
 
