@@ -6,11 +6,21 @@
 set -e
 umask 077
 # Sweep runs whose daemon (or, from older rcc, sshfs) is gone.
+# A daemon pid counts only while that pid is still this run's daemon (its
+# command line names the run dir): after a reboot the number may belong to
+# anything.
 for d in "$CACHE"/run/*/; do
   [ -d "$d" ] || continue
-  p=$(cat "$d/daemon.pid" 2>/dev/null || cat "$d/pid" 2>/dev/null || true)
+  if p=$(cat "$d/daemon.pid" 2>/dev/null) && [ -n "$p" ]; then
+    if kill -0 "$p" 2>/dev/null; then
+      [ -r "/proc/$p/cmdline" ] || continue
+      tr '\0' '\n' < "/proc/$p/cmdline" | grep -qxF "${d%/}" && continue
+    fi
+    rm -rf "$d"; continue
+  fi
+  p=$(cat "$d/pid" 2>/dev/null || true)
   if [ -n "$p" ]; then
-    kill -0 "$p" 2>/dev/null && continue        # still running
+    kill -0 "$p" 2>/dev/null && continue        # still running (older rcc)
   else
     # No pid yet: maybe another rcc is starting; only sweep old ones.
     [ -n "$(find "$d" -maxdepth 0 -mmin +2 2>/dev/null)" ] || continue

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Forced command of a one-time invite key (see `remote-cc user invite`):
+# Forced command of a one-time invite key (see `remote-cc server user invite`):
 # reads one public key on stdin, authorizes it for this user, and deletes
 # the invite key so the invite cannot be used again.
 set -eu

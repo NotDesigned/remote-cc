@@ -192,10 +192,17 @@ func UserAdd(c Config, name string, keyFiles []string, alias string) error {
 	return nil
 }
 
+// MaxInviteTTL is the longest an admin invite stays valid: whoever holds an
+// unused invite can add a device.
+const MaxInviteTTL = 30 * 24 * time.Hour
+
 // UserInvite prints a one-time invite for an existing user.
 func UserInvite(c Config, name, alias string, ttl time.Duration) error {
 	if err := sshconf.ValidUser(name); err != nil {
 		return err
+	}
+	if ttl > MaxInviteTTL {
+		return fmt.Errorf("--ttl %v is too long: an invite is valid for at most %v (720h); send a new one when it expires", ttl, MaxInviteTTL)
 	}
 	conn, err := c.open()
 	if err != nil {

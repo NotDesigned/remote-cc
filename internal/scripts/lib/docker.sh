@@ -29,7 +29,13 @@ owned_by() {
 
 # active_sessions CONTAINER: number of live rcc sessions in it (0 if absent).
 active_sessions() {
-  docker exec "$1" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); done; echo $n' 2>/dev/null || echo 0
+  # A daemon pid counts only while its command line still names the run dir
+  # (pids are reused after a restart); older rcc left only Claude's pid.
+  # shellcheck disable=SC2016 # expanded by the container's sh
+  docker exec "$1" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do
+    if [ -f "$d/daemon.pid" ]; then p=$(cat "$d/daemon.pid"); kill -0 "$p" 2>/dev/null && tr "\0" "\n" < "/proc/$p/cmdline" 2>/dev/null | grep -qxF "${d%/}" && n=$((n+1))
+    elif [ -f "$d/pid" ]; then kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); fi
+  done; echo $n' 2>/dev/null || echo 0
 }
 
 # wait_up CONTAINER...: wait until each one's sshd answers (60s). A host key

@@ -3,6 +3,7 @@ package server
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"remote-cc/internal/remote"
 )
@@ -22,5 +23,8 @@ func TestUserCommandsCheckName(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "invalid user name") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	if err := UserInvite(c, "alice", "", 31*24*time.Hour); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Errorf("unbounded --ttl: %v", err)
 	}
 }

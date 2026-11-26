@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -253,12 +254,18 @@ func mergeEnv(base []string, over map[string]string) []string {
 	return out
 }
 
+// secretRe finds what looks like a secret in a command line (a value after
+// token=, password: …, a bearer token, or an Anthropic or RCB key), so the
+// log keeps only its name.
+var secretRe = regexp.MustCompile(`(?i)((?:token|secret|passw(?:or)?d|api[_-]?key|authorization)["']?\s*[=:]\s*["']?(?:bearer\s+)?|bearer\s+|\b(?:sk-ant-|rcc[a-z]_))[^\s"'⏎]+`)
+
 func summarize(s string) string {
 	// Show just the user's command, not Claude's setup preamble.
 	if i := strings.LastIndex(s, "eval "); i >= 0 {
 		s = s[i+5:]
 	}
 	s = strings.ReplaceAll(s, "\n", "⏎")
+	s = secretRe.ReplaceAllString(s, "${1}…")
 	if len(s) > 160 {
 		s = s[:160] + "…"
 	}

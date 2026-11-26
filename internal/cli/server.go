@@ -95,7 +95,7 @@ var (
 		}
 		n, err := server.Forget(forget, c.InstallDir)
 		if err == nil && n == 0 {
-			err = fmt.Errorf("no remembered server %q (see: %s servers)", forget, remote.Prog)
+			err = fmt.Errorf("no remembered server %q (see: %s server list)", forget, remote.Prog)
 		}
 		return err
 	})

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -409,9 +410,24 @@ func openLog(logf func(string, ...any)) *os.File {
 		if os.MkdirAll(dir, 0o700) == nil {
 			// Keep the previous session's log too: problems are often
 			// reported after another session has started.
+			// The log names the commands Claude Code ran here: only this
+			// user may read it.
 			last := filepath.Join(dir, "last.log")
-			os.Rename(last, filepath.Join(dir, "prev.log"))
-			if f, err := os.Create(last); err == nil {
+			err := os.Rename(last, filepath.Join(dir, "prev.log"))
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				// Windows: another session still writes it. Never
+				// truncate that one; this session logs on its own.
+				last = filepath.Join(dir, fmt.Sprintf("session-%d.log", os.Getpid()))
+			}
+			if old, _ := filepath.Glob(filepath.Join(dir, "session-*.log")); len(old) > 0 {
+				for _, p := range old {
+					if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) > 7*24*time.Hour {
+						os.Remove(p)
+					}
+				}
+			}
+			if f, err := os.OpenFile(last, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600); err == nil {
+				f.Chmod(0o600) // an older rcc made it 0644
 				logf("log file: %s", f.Name())
 				return f
 			}
