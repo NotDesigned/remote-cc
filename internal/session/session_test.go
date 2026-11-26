@@ -174,6 +174,77 @@ func TestSessionSurvivesDrops(t *testing.T) {
 	waitGone(t, h.run)
 }
 
+// A first connection that says hello but drops before the stream resumes
+// must not leave the session without its multiplexer: the next one works.
+func TestFirstAttachFails(t *testing.T) {
+	h, d := newHarness(t, `printf 'ready\n'; sleep 60`, time.Minute)
+	c, err := net.Dial("unix", filepath.Join(h.run, "session.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(c, helloPrefix+"tok\n")
+	if l, _ := readLine(c, 256); l != "ok" {
+		t.Fatalf("hello answer %q", l)
+	}
+	c.Close() // before the resume handshake
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d.mu.Lock()
+		linked := d.link != nil
+		d.mu.Unlock()
+		if linked || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // the failed Attach returns
+	h.start(time.Minute)
+	h.waitOutput("ready")
+}
+
+// A Ctrl-C typed just as a reconnect succeeds must not cut the keyboard off
+// Claude Code, nor make the next disconnect give up at once.
+func TestCtrlCRacingReconnect(t *testing.T) {
+	h, _ := newHarness(t, `printf 'ready\n'; while read a; do printf 'got:%s\n' "$a"; done`, time.Minute)
+	stdinR, stdinW := io.Pipe()
+	var once sync.Once
+	reconnected := make(chan struct{}, 4)
+	go Run(ClientConfig{
+		Token:    "tok",
+		Connect:  h.connect,
+		Files:    func(rw io.ReadWriteCloser) error { io.Copy(io.Discard, rw); return nil },
+		Commands: echo,
+		Stdin:    stdinR,
+		Stdout:   &h.out,
+		Stderr:   io.Discard,
+		Grace:    time.Minute,
+		Backoff:  func(int) time.Duration { return 50 * time.Millisecond },
+		Logf: func(f string, a ...any) {
+			if strings.HasPrefix(f, "reconnected") {
+				// The stream is back, the client does not know yet.
+				once.Do(func() {
+					stdinW.Write([]byte{3})
+					time.Sleep(200 * time.Millisecond)
+				})
+				reconnected <- struct{}{}
+			}
+		},
+	})
+	h.waitOutput("ready")
+	h.cut()
+	<-reconnected
+	go stdinW.Write([]byte("one\n")) // blocks forever if the keyboard was cut off
+	h.waitOutput("got:one")
+	h.cut()
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gave up on the next disconnect")
+	}
+	stdinW.Write([]byte("two\n"))
+	h.waitOutput("got:two")
+}
+
 // Without a connection for the grace period, the daemon ends the session
 // and removes its directory; the client then hears that it ended.
 func TestGracePeriod(t *testing.T) {

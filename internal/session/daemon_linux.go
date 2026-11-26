@@ -243,8 +243,7 @@ func (d *daemon) transport(c net.Conn) {
 		c.Close()
 		return
 	}
-	first := d.link == nil
-	if first {
+	if d.link == nil {
 		d.link = resume.New(resume.Options{})
 	}
 	link := d.link
@@ -258,17 +257,23 @@ func (d *daemon) transport(c net.Conn) {
 		d.logf("attach: %v", err)
 		return
 	}
-	if first {
+	// The multiplexer starts with the first attach that succeeds (not the
+	// first connection: that one may drop before the stream resumed).
+	d.mu.Lock()
+	var newMux *yamux.Session
+	if d.mux == nil {
 		mux, err := yamux.Server(link, muxConfig())
 		if err != nil {
+			d.mu.Unlock()
 			d.end("yamux: " + err.Error())
 			return
 		}
-		d.mu.Lock()
-		d.mux = mux
-		d.mu.Unlock()
+		d.mux, newMux = mux, mux
+	}
+	d.mu.Unlock()
+	if newMux != nil {
 		close(d.muxReady)
-		go d.acceptStreams(mux)
+		go d.acceptStreams(newMux)
 	}
 	d.mu.Lock()
 	d.attaches++

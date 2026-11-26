@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -130,19 +129,30 @@ func Run(cfg ClientConfig) (int, error) {
 		}()
 	}
 
-	var disconnected atomic.Bool
-	abort := make(chan struct{})
-	var abortOnce sync.Once
-	go func() { // keyboard → Claude Code; Ctrl-C while disconnected gives up
+	// Ctrl-C while disconnected asks reconnect to give up. The check and the
+	// request happen under mu, and the main loop clears both under mu once
+	// reconnected: a Ctrl-C racing the reconnect can neither end the next
+	// disconnect at once nor stop the keyboard from reaching Claude Code.
+	var (
+		mu           sync.Mutex
+		disconnected bool
+	)
+	abort := make(chan struct{}, 1)
+	go func() { // keyboard → Claude Code
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := cfg.Stdin.Read(buf)
 			if n > 0 {
-				if disconnected.Load() && bytes.IndexByte(buf[:n], 3) >= 0 {
-					abortOnce.Do(func() { close(abort) })
-					return
+				mu.Lock()
+				giveUp := disconnected && bytes.IndexByte(buf[:n], 3) >= 0
+				if giveUp {
+					select {
+					case abort <- struct{}{}:
+					default:
+					}
 				}
-				if pc.Write(tData, buf[:n]) != nil {
+				mu.Unlock()
+				if !giveUp && pc.Write(tData, buf[:n]) != nil {
 					return
 				}
 			}
@@ -191,14 +201,22 @@ func Run(cfg ClientConfig) (int, error) {
 			hangup = nil
 			pc.Write(tHangup, nil)
 		case <-done:
-			disconnected.Store(true)
+			mu.Lock()
+			disconnected = true
+			mu.Unlock()
 			fmt.Fprint(cfg.Stderr, "\r\nrcc: connection lost; reconnecting (Ctrl-C ends the session) …\r\n")
 			next, err := reconnect(cfg, link, abort, hangup)
 			if err != nil {
 				return 1, err
 			}
 			done = next
-			disconnected.Store(false)
+			mu.Lock()
+			disconnected = false
+			select { // a Ctrl-C that lost the race to the reconnect
+			case <-abort:
+			default:
+			}
+			mu.Unlock()
 		}
 	}
 }
