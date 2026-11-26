@@ -27,7 +27,7 @@
 ### 升级步骤
 
 - 在每台电脑上 `remote-cc update`，并建议装上 ripgrep（`brew install ripgrep`、`apt install ripgrep`、`winget install BurntSushi.ripgrep.MSVC`）。
-- 服务器上 `remote-cc server update <服务器>`（重连后不再改终端宽度的修复在服务器一侧）。
+- 服务器不用更新：会话守护进程由电脑上的 remote-cc 每次连接时带过去，电脑更新后新开的会话就用上重连的修复。
 
 ## 0.8.2（2026-11-27）
 
