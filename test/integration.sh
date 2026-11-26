@@ -172,6 +172,55 @@ step "server update"
 remote-cc server update --image "$IMAGE" "$ADMIN"
 [ "$(ssh -o BatchMode=yes "$alias" hostname)" = rcc-owner ] || fail "after update"
 
+step "server update during a session: gateway now, the user's container once the session ends"
+printf 'FROM %s\nRUN echo v2 > /etc/rcc-image-mark\n' "$IMAGE" | sudo docker build -q -t rcc-test:v2 - >/dev/null
+cat > /tmp/fake-long <<'EOF'
+#!/bin/sh
+# N seconds of work through the mount and the command channel, noting the
+# image it runs on.
+set -e
+rm -f ticks.txt cmds.txt
+i=0
+while [ $i -lt "$1" ]; do
+  i=$((i+1))
+  echo "$i $(cat /etc/rcc-image-mark 2>/dev/null || echo v1)" >> ticks.txt
+  if [ $((i % 5)) = 0 ]; then "$CLAUDE_CODE_SHELL_PREFIX" "echo $i >> cmds.txt"; fi
+  sleep 1
+done
+echo done >> ticks.txt
+EOF
+# In /root: kept when the container is recreated.
+sudo docker cp /tmp/fake-long rcc-owner:/root/fake-long
+sudo docker exec rcc-owner chmod 755 /root/fake-long
+gw0=$(sudo docker inspect -f '{{.Id}}' remote-cc-gateway)
+u0=$(sudo docker inspect -f '{{.Id}}' rcc-owner)
+rm -f "$proj/ticks.txt" /tmp/long.rc
+( rc=0; tty_run "cd '$proj' && remote-cc --claude /root/fake-long $alias -- 40" > /tmp/long.out 2>&1 || rc=$?; echo "$rc" > /tmp/long.rc ) &
+long=$!
+for _ in $(seq 60); do [ -s "$proj/ticks.txt" ] && break; sleep 1; done
+[ -s "$proj/ticks.txt" ] || fail "the long session did not start"
+remote-cc server update --image rcc-test:v2 "$ADMIN" | tee /tmp/upd2
+grep -q "pending: owner has 1 active session" /tmp/upd2 || fail "owner not reported pending"
+[ "$(sudo docker inspect -f '{{.Id}}' remote-cc-gateway)" != "$gw0" ] || fail "the gateway was not recreated"
+[ "$(sudo docker inspect -f '{{.Id}}' rcc-owner)" = "$u0" ] || fail "rcc-owner was recreated during its session"
+remote-cc server user list "$ADMIN" | tee /tmp/users
+grep -Eq '^owner .*pending' /tmp/users || fail "server user list does not show the pending update"
+wait "$long" || true
+cat /tmp/long.out
+[ "$(cat /tmp/long.rc)" = 0 ] || fail "the session did not survive the update"
+[ "$(tail -1 "$proj/ticks.txt")" = "done" ] || fail "the session's work was cut short"
+[ "$(wc -l < "$proj/cmds.txt")" = 8 ] || fail "commands lost: $(cat "$proj/cmds.txt")"
+grep -q "reconnected after" ~/.cache/rcc/last.log || fail "no reconnect through the new gateway"
+grep -q "^40 v1$" "$proj/ticks.txt" || fail "the session moved images"
+# The worker applies the pending update once the session has ended.
+for _ in $(seq 60); do
+  [ "$(sudo docker inspect -f '{{.Config.Image}}' rcc-owner)" = rcc-test:v2 ] && break; sleep 1
+done
+[ "$(sudo docker inspect -f '{{.Config.Image}}' rcc-owner)" = rcc-test:v2 ] || fail "the pending update was not applied"
+tty_run "cd '$proj' && remote-cc --claude /root/fake-long $alias -- 2"
+grep -q "^2 v2$" "$proj/ticks.txt" || fail "the next session is not on the new image"
+remote-cc server user list "$ADMIN" | grep -Eq '^owner .*pending' && fail "still pending"
+
 step "server migrate: a 0.4 single-container deployment"
 ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/single_ed25519
 sdir=/opt/rcc-single sdata=/var/lib/rcc-single
