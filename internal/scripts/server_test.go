@@ -35,8 +35,34 @@ image)
   [ "$2" = inspect ] || exit 0
   cat "$FAKE/img/$(echo "$5" | tr '/:' '__')" 2>/dev/null || exit 1 ;;
 pull) echo "$2 $3" >> "$FAKE/pull.log" ;;
+start) echo true > "$st/$2/running" ;;
 exec)
-  case "$3" in sh) echo 0 ;; claude) echo 2.0.0 ;; ssh-keyscan) echo "127.0.0.1 ssh-ed25519 AAAA" ;; esac ;;
+  shift; in=""; [ "$1" = -i ] && { in=1; shift; }
+  c=$1; shift
+  [ "$(cat "$st/$c/running" 2>/dev/null || echo true)" = true ] || { echo "fake: $c is not running" >&2; exit 1; }
+  echo "$c $*" >> "$FAKE/exec.log"
+  case "$1" in
+  claude) echo 2.0.0 ;;
+  ssh-keyscan) echo "127.0.0.1 ssh-ed25519 AAAA" ;;
+  date) shift; date "$@" ;;
+  sh)
+    # sh -c SCRIPT [ARG0 ARGS…]: active_sessions answers from a file; other
+    # scripts run here, with the container's paths moved into $st/<c>/fs
+    # (never into the host dirs the tests attack).
+    script=$3; shift 3
+    case "$script" in *"kill -0"*) cat "$st/$c/sessions" 2>/dev/null || echo 0; exit 0 ;; esac
+    fs="$st/$c/fs"
+    mkdir -p "$fs/userkeys" "$fs/sshkeys" "$fs/invites"
+    [ -f "$fs/sshkeys/ssh_host_ed25519_key.pub" ] ||
+      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE root@$c" > "$fs/sshkeys/ssh_host_ed25519_key.pub"
+    script=$(printf '%s' "$script" | sed -e "s#/etc/remote-cc/userkeys#$fs/userkeys#g" -e "s#/etc/ssh/keys#$fs/sshkeys#g" -e "s#/etc/remote-cc/invites#$fs/invites#g")
+    for a in "$@"; do
+      set -- "$@" "$(printf '%s' "$a" | sed -e "s#/etc/remote-cc/userkeys#$fs/userkeys#g" -e "s#/etc/remote-cc/invites#$fs/invites#g")"
+      shift
+    done
+    if [ -z "$in" ]; then exec sh -c "$script" "$@" < /dev/null; fi
+    exec sh -c "$script" "$@" ;;
+  esac ;;
 esac
 exit 0
 `
@@ -189,7 +215,7 @@ func TestUpdateEgressHost(t *testing.T) {
 	}
 	// A busy user blocks it like any recreate.
 	h.write(filepath.Join(h.fake, "img/eg_latest"), "sha:e3")
-	h.write(filepath.Join(h.bin, "docker"), strings.Replace(fakeDocker, "sh) echo 0", "sh) echo 1", 1))
+	h.write(filepath.Join(h.fake, "c/rcc-alice/sessions"), "1\n")
 	if _, err := h.run("server/update.sh", "", updateParams()...); err == nil || h.composeLog() != "" {
 		t.Fatal("recreated the egress host during a session")
 	}

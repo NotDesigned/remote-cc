@@ -56,8 +56,17 @@ umask 022
   mkdir -p "$u" "$DATA/keys/$NAME" "$DATA/gateway/etc" "$DATA/gateway/ssh" "$DATA/invites" "$DIR/users/$NAME" "$DATA/egress/users/$NAME" &&
   chmod 700 "$DATA/users" "$u" "$DATA/gateway/ssh" &&
   mv "$DATA/root" "$u/root" && mv "$DATA/ssh" "$u/ssh" &&
-  cp -a "$u/ssh/." "$DATA/gateway/ssh/" &&
-  { grep -vE '^[[:space:]]*(#|$)' "$u/root/.ssh/authorized_keys" 2>/dev/null || true; } > "$DATA/keys/$NAME/authorized_keys" &&
+  # The old container is stopped, so nothing changes these files meanwhile;
+  # still, it could write them before: copy only regular files, never what
+  # a symlink points to on this host (see lib/docker.sh).
+  for f in "$u/ssh"/ssh_host_*; do
+    if [ -f "$f" ] && [ ! -L "$f" ]; then cp -p "$f" "$DATA/gateway/ssh/"; fi
+  done &&
+  if [ -d "$u/root/.ssh" ] && [ ! -L "$u/root/.ssh" ] && [ -f "$u/root/.ssh/authorized_keys" ] && [ ! -L "$u/root/.ssh/authorized_keys" ]; then
+    { grep -vE '^[[:space:]]*(#|$)' "$u/root/.ssh/authorized_keys" || true; } > "$DATA/keys/$NAME/authorized_keys"
+  else
+    : > "$DATA/keys/$NAME/authorized_keys"
+  fi &&
   chmod 755 "$DATA/keys" "$DATA/keys/$NAME" && chmod 644 "$DATA/keys/$NAME/authorized_keys" &&
   echo "$NAME" > "$DATA/gateway/etc/users" &&
   printf '%s' "$COMPOSE_GW_B64" | base64 -d > "$DIR/compose.yml" &&
@@ -71,6 +80,6 @@ umask 022
 } || rollback
 wait_up "$GW" "rcc-$NAME" || rollback
 echo "port=$PORT"
-echo "gwkey=$(pubkey "$DATA/gateway/ssh/ssh_host_ed25519_key.pub")"
-echo "ukey=$(pubkey "$u/ssh/ssh_host_ed25519_key.pub")"
-echo "keys=$(grep -c . "$DATA/keys/$NAME/authorized_keys")"
+echo "gwkey=$(hostkey "$GW")"
+echo "ukey=$(hostkey "rcc-$NAME")"
+echo "keys=$(count_keys "rcc-$NAME")"

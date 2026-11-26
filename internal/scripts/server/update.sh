@@ -9,7 +9,7 @@ cd "$DIR" || exit 3
 if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
 image=$(sed -n 's/^RCC_IMAGE=//p' .env)
 grep -q '^COMPOSE_PROJECT_NAME=' .env || echo "COMPOSE_PROJECT_NAME=$NET" >> .env
-users=$(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true)
+users=$(user_names)
 first=$(printf '%s\n' "$users" | head -1)
 # egress_src CONTAINER: the host dir mounted at /run/rcc-egress ("" if none).
 egress_src() { docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/rcc-egress"}}{{.Source}}{{end}}{{end}}' "$1" 2>/dev/null || true; }

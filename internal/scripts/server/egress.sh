@@ -31,7 +31,7 @@ RCC_EGRESS_IMAGE=$eimage
 COMPOSE_PROJECT_NAME=$NET-egress
 ENV
 [ -z "$limits" ] || printf '%s\n' "$limits" >> "$e/.env"
-for n in $(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true); do
+for n in $(user_names); do
   mkdir -p "$DATA/egress/users/$n"
 done
 # compose --pull missing never fetches a newer :latest; pull it here.
@@ -60,7 +60,7 @@ fi
 egress_src() { docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/rcc-egress"}}{{.Source}}{{end}}{{end}}' "$1" 2>/dev/null || true; }
 attached=""; busy=""
 user_compose=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
-for n in $(grep -v '^$' "$DATA/gateway/etc/users" 2>/dev/null || true); do
+for n in $(user_names); do
   want="$DATA/egress/users/$n"
   [ "$(egress_src "rcc-$n")" = "$want" ] && continue
   [ -d "$DIR/users/$n" ] || continue

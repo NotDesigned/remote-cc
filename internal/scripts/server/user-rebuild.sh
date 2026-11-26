@@ -4,6 +4,7 @@
 # kept. Refuses while the user has sessions, unless FORCE=1.
 : "${DIR:?}" "${NAME:?}" "${FORCE:?}"
 load_server
+valid_name "$NAME" || { echo "rcc: invalid user name $NAME" >&2; exit 2; }
 [ -d "$DIR/users/$NAME" ] || { echo "rcc: no user $NAME" >&2; exit 3; }
 owned_by "rcc-$NAME" "$DIR/users/$NAME"
 active=$(active_sessions "rcc-$NAME")
