@@ -46,6 +46,7 @@ fi
 cd "$e" || exit 3
 if [ "$recreate" = 1 ]; then
   docker compose up -d --pull missing --quiet-pull --force-recreate >&2
+  rm -f update-pending
   echo "recreated=1"
   # The daemon exits at once on a bad configuration; give it the time to.
   sleep 2
@@ -56,7 +57,8 @@ if [ "$(docker inspect -f '{{.State.Running}}' "$NET-egress" 2>/dev/null)" != tr
 fi
 # Users whose container lacks this user's own egress mount (it predates the
 # egress host, or an older setup mounted another dir) get it now, unless a
-# session is running there (recreating would cut it off).
+# session is running there (recreating would cut it off): then it is marked
+# pending and gets it once its sessions end (see lib/docker.sh).
 egress_src() { docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/rcc-egress"}}{{.Source}}{{end}}{{end}}' "$1" 2>/dev/null || true; }
 attached=""; busy=""
 user_compose=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
@@ -68,9 +70,13 @@ for n in $(user_names); do
   if ! grep -qxF "RCC_EGRESS_DIR=$want" "$DIR/users/$n/.env"; then
     sed -i '/^RCC_EGRESS_DIR=/d' "$DIR/users/$n/.env"; echo "RCC_EGRESS_DIR=$want" >> "$DIR/users/$n/.env"
   fi
-  if [ "$(active_sessions "rcc-$n")" -gt 0 ]; then busy="$busy $n"; continue; fi
   printf '%s\n' "$user_compose" > "$DIR/users/$n/compose.yml"
-  (cd "$DIR/users/$n" && docker compose up -d >&2) && attached="$attached $n"
+  if claim_user "$n" >/dev/null; then
+    recreate_user "$n" && attached="$attached $n"
+  else
+    mark_pending "$n"; busy="$busy $n"
+  fi
 done
+start_worker
 echo "attached=$attached"
 echo "busy=$busy"

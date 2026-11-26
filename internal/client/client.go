@@ -212,6 +212,9 @@ func Run(cfg Config) (int, error) {
 	if err := s.check(); err != nil {
 		return 1, err
 	}
+	if s.facts["update_pending"] == "1" {
+		fmt.Fprintln(os.Stderr, "rcc: a server update for your container is waiting; it is applied once none of your sessions on it runs")
+	}
 	return s.startRCB(func(grant string) (int, error) {
 		s.grant = grant
 		return s.start(ag, token, logger, logFile)
@@ -362,7 +365,72 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 	signal.Ignore(os.Interrupt)
 	defer signal.Reset(os.Interrupt)
 	s.conn.Logf("mount=%s", s.remote)
-	code, err := live.Run(live.ClientConfig{
+	// A server update may be replacing the container right now (it found no
+	// session running): start the session on the new one.
+	var giveUp time.Time
+	for {
+		code, err := s.attempt(ag, token, logger, connect)
+		var se *live.StartError
+		if errors.As(err, &se) && updating(startErr.String()) {
+			if giveUp.IsZero() {
+				giveUp = time.Now().Add(replaceWait)
+				fmt.Fprintln(os.Stderr, "rcc: a server update is replacing your container; starting the session on the new one …")
+			}
+			logger.Printf("container being replaced; waiting for the new one")
+			if err := s.reprobe(giveUp); err != nil {
+				return 1, err
+			}
+			if _, err := s.ensureShim(); err != nil {
+				return 1, err
+			}
+			startErr.Reset()
+			continue
+		}
+		if errors.As(err, &se) && strings.TrimSpace(startErr.String()) != "" {
+			err = fmt.Errorf("starting the session on the server failed:\n%s", strings.TrimSpace(startErr.String()))
+		}
+		return code, err
+	}
+}
+
+// updatingMark is what client/session.sh prints when a server update is
+// replacing the container.
+const updatingMark = "rcc-container-updating"
+
+func updating(stderr string) bool { return strings.Contains(stderr, updatingMark) }
+
+// replaceWait bounds the wait for a container a server update replaces.
+var replaceWait = 3 * time.Minute
+
+// reprobe waits until the server (the user's container) answers the probe
+// again, then uses that connection and its facts.
+func (s *session) reprobe(until time.Time) error {
+	for {
+		time.Sleep(2 * time.Second)
+		conn, err := remote.Open(s.cfg.Target)
+		if err == nil {
+			c := conn.Script(false, []string{"-o", "ConnectTimeout=10"}, scripts.Get("client/probe.sh"))
+			if out, err := c.Output(); err == nil {
+				f := remote.ParseFacts(out)
+				if s.cfg.ClaudePath != "" {
+					f["claude"] = s.cfg.ClaudePath
+				}
+				s.conn.Close()
+				s.conn, s.facts = conn, f
+				return nil
+			}
+			conn.Close()
+		}
+		if time.Now().After(until) {
+			return errors.New("your container did not come back after a server update; try again in a minute")
+		}
+	}
+}
+
+// attempt is one try at starting and running the session (see start).
+func (s *session) attempt(ag *agent.Agent, token string, logger *log.Logger,
+	connect func(first bool) (io.ReadWriteCloser, error)) (int, error) {
+	return live.Run(live.ClientConfig{
 		Token:    token,
 		Connect:  connect,
 		Files:    func(rw io.ReadWriteCloser) error { return fsserver.Serve(rw, s.remote) },
@@ -390,11 +458,6 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 			}
 		},
 	})
-	var se *live.StartError
-	if errors.As(err, &se) && strings.TrimSpace(startErr.String()) != "" {
-		err = fmt.Errorf("starting the session on the server failed:\n%s", strings.TrimSpace(startErr.String()))
-	}
-	return code, err
 }
 
 func openLog(logf func(string, ...any)) *os.File {

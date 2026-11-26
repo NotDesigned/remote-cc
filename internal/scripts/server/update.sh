@@ -1,8 +1,10 @@
 # shellcheck shell=sh
 # Starts stopped containers, pulls the images and recreates the gateway, user
 # and egress containers only when the image or compose files changed (or a
-# user's egress mount is missing or wrong); refuses while sessions run
-# (unless FORCE).
+# user's egress mount is missing or wrong). Never cuts a session off (unless
+# FORCE): the gateway is recreated anyway (sessions reconnect), busy users
+# and a busy egress host are marked pending and recreated by the worker
+# (WORKER_B64, server/pending.sh) once their sessions end.
 : "${DIR:?}" "${IMAGE?}" "${FORCE:?}" "${COMPOSE_GW_B64:?}" "${COMPOSE_USER_B64:?}" "${COMPOSE_EGRESS_B64:?}"
 load_server
 cd "$DIR" || exit 3
@@ -53,10 +55,13 @@ docker pull -q "$image" >/dev/null 2>&1 || echo "rcc: warning: could not pull $i
 latest=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
 gw_new=$(printf '%s' "$COMPOSE_GW_B64" | base64 -d); user_new=$(printf '%s' "$COMPOSE_USER_B64" | base64 -d)
 project() { docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null; }
+gw_changed=0
+{ [ "$(docker inspect -f '{{.Image}}' "$GW" 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ]; } || gw_changed=1
+# A user marked pending by an earlier update still needs it, even when its
+# compose file is already the new one.
 changed=""
-{ [ "$(docker inspect -f '{{.Image}}' "$GW" 2>/dev/null)" = "$latest" ] && [ "$gw_new" = "$(cat compose.yml)" ]; } || changed="gateway"
 for n in $users; do
-  { [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] &&
+  { [ ! -f "users/$n/update-pending" ] && [ "$(docker inspect -f '{{.Image}}' "rcc-$n" 2>/dev/null)" = "$latest" ] &&
     [ "$user_new" = "$(cat "users/$n/compose.yml" 2>/dev/null)" ] && [ "$(project "rcc-$n")" = "rcc-$n" ] &&
     [ "$(egress_src "rcc-$n")" = "$DATA/egress/users/$n" ]; } || changed="$changed $n"
 done
@@ -65,34 +70,51 @@ if [ -n "$ename" ]; then
   docker pull -q "$eimage" >/dev/null 2>&1 || echo "rcc: warning: could not pull $eimage; comparing with the local image" >&2
   elatest=$(docker image inspect -f '{{.Id}}' "$eimage" 2>/dev/null || true)
   egress_new=$(printf '%s' "$COMPOSE_EGRESS_B64" | base64 -d)
-  { [ "$(docker inspect -f '{{.Image}}' "$ename" 2>/dev/null)" = "$elatest" ] && [ "$egress_new" = "$(cat egress/compose.yml 2>/dev/null)" ]; } ||
-    { egress_changed=1; changed="$changed egress"; }
+  { [ ! -f egress/update-pending ] && [ "$(docker inspect -f '{{.Image}}' "$ename" 2>/dev/null)" = "$elatest" ] &&
+    [ "$egress_new" = "$(cat egress/compose.yml 2>/dev/null)" ]; } || egress_changed=1
 fi
-[ -n "$changed" ] || { echo "uptodate=1"; exit 0; }
-# Recreating the egress host also cuts --rcb sessions off their node.
-busy=""
-for n in $users; do
-  a=$(active_sessions "rcc-$n")
-  [ "$a" -gt 0 ] && busy="$busy $n($a)"
-done
-if [ -n "$busy" ] && [ "$FORCE" != 1 ]; then
-  echo "rcc: active sessions would be disconnected:$busy; retry when they end, or pass --force" >&2; exit 5
-fi
+if [ "$gw_changed" = 0 ] && [ -z "$changed" ] && [ "$egress_changed" = 0 ]; then echo "uptodate=1"; exit 0; fi
 ids() { for c in "$GW" $(for n in $users; do echo "rcc-$n"; done) $ename; do docker inspect -f '{{.Id}}' "$c" 2>/dev/null; done; }
 ids0=$(ids)
-printf '%s\n' "$gw_new" > compose.yml && docker compose up -d >&2
-for n in $users; do
+# The gateway is recreated even while sessions run: it keeps no session
+# state and its host keys live in <data>/gateway/ssh, so sessions passing
+# through it reconnect to the new one by themselves.
+if [ "$gw_changed" = 1 ]; then
+  printf '%s\n' "$gw_new" > compose.yml && docker compose up -d >&2
+  echo "gateway=updated"
+fi
+# Users: recreated now when no session runs in them (claim_user turns new
+# sessions away meanwhile), else marked pending; --force recreates them all.
+updated=""; pending=""
+for n in $changed; do
   printf '%s\n' "$user_new" > "users/$n/compose.yml"
-  p=$(project "rcc-$n")
-  if [ -n "$p" ] && [ "$p" != "rcc-$n" ]; then docker rm -f "rcc-$n" >/dev/null; fi   # rcc <= 0.4.0 project name
-  (cd "users/$n" && docker compose up -d >&2)
+  if [ "$FORCE" = 1 ]; then
+    recreate_user "$n" && updated="$updated $n"
+  elif a=$(claim_user "$n"); then
+    recreate_user "$n" && updated="$updated $n"
+  else
+    mark_pending "$n"; pending="$pending $n(${a:-?})"
+  fi
 done
+[ -z "$updated" ] || echo "updated=${updated# }"
+[ -z "$pending" ] || echo "pending=${pending# }"
+# The egress host: recreating it cuts --rcb sessions off their node.
 if [ "$egress_changed" = 1 ]; then
   printf '%s\n' "$egress_new" > egress/compose.yml
-  # compose alone misses a re-pulled :latest; the image ID said it changed.
-  (cd egress && docker compose up -d --pull missing --quiet-pull --force-recreate >&2)
-  echo "egress=updated"
+  busy=0
+  [ "$FORCE" = 1 ] || busy=$(egress_busy)
+  if [ "$busy" = 0 ]; then
+    # compose alone misses a re-pulled :latest; the image ID said it changed.
+    (cd egress && docker compose up -d --pull missing --quiet-pull --force-recreate >&2)
+    rm -f egress/update-pending
+    echo "egress=updated"
+  else
+    date +%s > egress/update-pending
+    echo "egress=pending($busy)"
+  fi
 fi
+start_worker
+# Images still used by a pending container are kept.
 docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/NotDesigned/remote-cc" >/dev/null 2>&1 || true
-echo "after=$(docker exec "rcc-$first" claude --version 2>/dev/null | head -1)"
+echo "after=$(docker exec "$GW" claude --version 2>/dev/null | head -1)"
 if [ "$ids0" != "$(ids)" ]; then echo "recreated=1"; fi

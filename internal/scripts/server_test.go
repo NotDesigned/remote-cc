@@ -36,6 +36,11 @@ image)
   cat "$FAKE/img/$(echo "$5" | tr '/:' '__')" 2>/dev/null || exit 1 ;;
 pull) echo "$2 $3" >> "$FAKE/pull.log" ;;
 start) echo true > "$st/$2/running" ;;
+top)
+  # A session daemon's process while $st/<c>/sessions is not 0.
+  [ -d "$st/$2" ] || exit 1
+  echo COMMAND
+  [ "$(cat "$st/$2/sessions" 2>/dev/null || echo 0)" = 0 ] || echo "rcc-shim __rcc-daemon /root/.cache/rcc/run/x" ;;
 exec)
   shift; in=""; [ "$1" = -i ] && { in=1; shift; }
   c=$1; shift
@@ -49,8 +54,17 @@ exec)
     # sh -c SCRIPT [ARG0 ARGS…]: active_sessions answers from a file; other
     # scripts run here, with the container's paths moved into $st/<c>/fs
     # (never into the host dirs the tests attack).
+    # claim_user claims while there are no sessions (logged to claim.log);
+    # rcb_sessions answers from $st/<c>/rcb.
     script=$3; shift 3
-    case "$script" in *"kill -0"*) cat "$st/$c/sessions" 2>/dev/null || echo 0; exit 0 ;; esac
+    n=$(cat "$st/$c/sessions" 2>/dev/null || echo 0)
+    case "$script" in
+    *rcc-updating*)
+      if [ "$n" -gt 0 ]; then echo "$n"; exit 1; fi
+      echo "$c" >> "$FAKE/claim.log"; exit 0 ;;
+    *'echo $r') cat "$st/$c/rcb" 2>/dev/null || echo 0; exit 0 ;;
+    *"kill -0"*) echo "$n"; exit 0 ;;
+    esac
     fs="$st/$c/fs"
     mkdir -p "$fs/userkeys" "$fs/sshkeys" "$fs/invites"
     [ -f "$fs/sshkeys/ssh_host_ed25519_key.pub" ] ||
@@ -213,11 +227,23 @@ func TestUpdateEgressHost(t *testing.T) {
 	if h.read(filepath.Join(h.dir, "egress/token")) != "rcch_old\n" || h.read(filepath.Join(h.dir, "egress/.env")) != env {
 		t.Fatal("update changed the egress token or .env")
 	}
-	// A busy user blocks it like any recreate.
+	// A session without --rcb does not need it.
+	h.container("net-egress", map[string]string{"image": "sha:e2"})
 	h.write(filepath.Join(h.fake, "img/eg_latest"), "sha:e3")
 	h.write(filepath.Join(h.fake, "c/rcc-alice/sessions"), "1\n")
-	if _, err := h.run("server/update.sh", "", updateParams()...); err == nil || h.composeLog() != "" {
-		t.Fatal("recreated the egress host during a session")
+	if out, err := h.run("server/update.sh", "", updateParams()...); err != nil || !strings.Contains(out, "egress=updated") {
+		t.Fatalf("egress host not updated during a plain session: %q", out)
+	}
+	// An --rcb session defers it; the update still succeeds.
+	h.container("net-egress", map[string]string{"image": "sha:e3"})
+	h.write(filepath.Join(h.fake, "img/eg_latest"), "sha:e4")
+	h.write(filepath.Join(h.fake, "c/rcc-alice/rcb"), "1\n")
+	out, err = h.run("server/update.sh", "", updateParams()...)
+	if err != nil || !strings.Contains(out, "egress=pending(1)") || strings.Contains(h.composeLog(), "egress") {
+		t.Fatalf("egress host recreated during an --rcb session: %q / %q", out, h.composeLog())
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "egress/update-pending")); err != nil {
+		t.Fatal("egress host not marked pending")
 	}
 }
 

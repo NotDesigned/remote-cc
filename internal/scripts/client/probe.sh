@@ -11,6 +11,9 @@ for b in sshfs unshare nsenter mountpoint fusermount3 fusermount base64 sha256su
   p=$(command -v $b 2>/dev/null) && echo "bin_$b=$p"
 done
 [ -e /dev/fuse ] && echo "fuse=1"
+# A server update waits for this container's sessions to end (see
+# lib/docker.sh, "Deferred updates").
+[ -f /run/rcc-update-pending ] && echo "update_pending=1"
 c=$(command -v claude 2>/dev/null)
 [ -n "$c" ] || c=$("${SHELL:-sh}" -lc 'command -v claude' </dev/null 2>/dev/null | tail -n1)
 [ -n "$c" ] || c=$("${SHELL:-sh}" -ic 'command -v claude' </dev/null 2>/dev/null | tail -n1)

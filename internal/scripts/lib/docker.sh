@@ -27,15 +27,117 @@ owned_by() {
   fi
 }
 
+# count_sh: shell code, run inside a user container, that sets n to its
+# live rcc sessions and r to those of them with --rcb (which use the egress
+# host). A daemon pid counts only while its command line still names the run
+# dir (pids are reused after a restart); older rcc left only Claude's pid.
+count_sh() {
+  cat <<'EOF'
+n=0; r=0
+for d in /root/.cache/rcc/run/*/; do
+  live=0
+  if [ -f "$d/daemon.pid" ]; then
+    p=$(cat "$d/daemon.pid"); kill -0 "$p" 2>/dev/null && tr "\0" "\n" < "/proc/$p/cmdline" 2>/dev/null | grep -qxF "${d%/}" && live=1
+  elif [ -f "$d/pid" ]; then
+    kill -0 "$(cat "$d/pid")" 2>/dev/null && live=1
+  fi
+  [ "$live" = 1 ] || continue
+  n=$((n+1))
+  # The launch script names the session's remote-claude-browser node.
+  grep -q "^RCB_NODE='[^']" "$d/launch.sh" 2>/dev/null && r=$((r+1))
+done
+EOF
+}
+
 # active_sessions CONTAINER: number of live rcc sessions in it (0 if absent).
-active_sessions() {
-  # A daemon pid counts only while its command line still names the run dir
-  # (pids are reused after a restart); older rcc left only Claude's pid.
-  # shellcheck disable=SC2016 # expanded by the container's sh
-  docker exec "$1" sh -c 'n=0; for d in /root/.cache/rcc/run/*/; do
-    if [ -f "$d/daemon.pid" ]; then p=$(cat "$d/daemon.pid"); kill -0 "$p" 2>/dev/null && tr "\0" "\n" < "/proc/$p/cmdline" 2>/dev/null | grep -qxF "${d%/}" && n=$((n+1))
-    elif [ -f "$d/pid" ]; then kill -0 "$(cat "$d/pid")" 2>/dev/null && n=$((n+1)); fi
-  done; echo $n' 2>/dev/null || echo 0
+active_sessions() { docker exec "$1" sh -c "$(count_sh)"'; echo $n' 2>/dev/null || echo 0; }
+
+# rcb_sessions CONTAINER: number of live --rcb sessions in it (0 if absent).
+rcb_sessions() { docker exec "$1" sh -c "$(count_sh)"'; echo $r' 2>/dev/null || echo 0; }
+
+# Deferred updates. A user container that needs recreating while sessions
+# run in it is left alone and marked pending (users/NAME/update-pending,
+# the new compose file already in place); likewise the egress host while
+# --rcb sessions run (egress/update-pending). A worker on the host
+# (server/pending.sh) applies them once nothing uses them any more.
+#
+# Inside a user container, /run/rcc-start.lock (flock) orders the two sides:
+# a session start (client/session.sh) holds it from its check until its
+# daemon runs; claim_user holds it while it counts sessions and, if there
+# are none, writes /run/rcc-updating, which turns later session starts away
+# until the container is replaced (/run is not kept across a recreate).
+# /run/rcc-update-pending tells the user's sessions an update is waiting.
+
+# claim_sh: run inside a user container; exit 0 = claimed (no sessions,
+# new ones turned away), 1 = sessions running (count printed), 2 = timeout.
+claim_sh() {
+  cat <<'EOF'
+if command -v flock >/dev/null; then
+  exec 9>/run/rcc-start.lock
+  flock -w 30 9 || exit 2
+fi
+EOF
+  count_sh
+  cat <<'EOF'
+if [ "$n" -gt 0 ]; then echo "$n"; exit 1; fi
+date +%s > /run/rcc-updating
+EOF
+}
+
+# claim_user NAME: claim_sh in rcc-NAME. A container that is not running
+# runs no session: claimed.
+claim_user() {
+  running "rcc-$1" || return 0
+  docker exec "rcc-$1" sh -c "$(claim_sh)"
+}
+
+# recreate_user NAME: replace rcc-NAME with a container from its compose
+# file (and the image it names) and clear its pending mark. Without FORCE,
+# only after claim_user succeeded.
+recreate_user() {
+  ru_p=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "rcc-$1" 2>/dev/null || true)
+  if [ -n "$ru_p" ] && [ "$ru_p" != "rcc-$1" ]; then docker rm -f "rcc-$1" >/dev/null; fi   # rcc <= 0.4.0 project name
+  if (cd "$DIR/users/$1" && docker compose up -d --force-recreate >&2); then
+    rm -f "$DIR/users/$1/update-pending"
+  else
+    docker exec "rcc-$1" rm -f /run/rcc-updating 2>/dev/null || true
+    return 1
+  fi
+}
+
+# mark_pending NAME: rcc-NAME is to be recreated once its sessions end.
+mark_pending() {
+  date +%s > "$DIR/users/$1/update-pending"
+  docker exec "rcc-$1" touch /run/rcc-update-pending 2>/dev/null || true
+}
+
+# egress_busy: number of --rcb sessions across all users.
+egress_busy() {
+  eb=0
+  for eb_n in $(user_names); do eb=$((eb + $(rcb_sessions "rcc-$eb_n"))); done
+  echo "$eb"
+}
+
+# any_pending: whether a user (in the list) or the egress host waits for
+# an update.
+any_pending() {
+  [ ! -f "$DIR/egress/update-pending" ] || return 0
+  for ap_n in $(user_names); do [ ! -f "$DIR/users/$ap_n/update-pending" ] || return 0; done
+  return 1
+}
+
+# start_worker: run server/pending.sh (WORKER_B64) in the background unless
+# one runs already; it exits once nothing is pending.
+start_worker() {
+  [ -n "${WORKER_B64:-}" ] || return 0
+  any_pending || return 0
+  printf '%s' "$WORKER_B64" | base64 -d > "$DIR/pending-worker.sh.tmp" && mv -f "$DIR/pending-worker.sh.tmp" "$DIR/pending-worker.sh"
+  if command -v systemd-run >/dev/null && [ -d /run/systemd/system ]; then
+    # Fails harmlessly while the unit (the worker) still runs.
+    systemd-run --quiet --collect --unit "rcc-pending-$NET" sh "$DIR/pending-worker.sh" >/dev/null 2>&1 || true
+  else
+    setsid nohup sh "$DIR/pending-worker.sh" >>"$DIR/pending-worker.log" 2>&1 </dev/null &
+  fi
 }
 
 # wait_up CONTAINER...: wait until each one's sshd answers (60s). A host key

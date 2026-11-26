@@ -27,6 +27,18 @@ for d in "$CACHE"/run/*/; do
   fi
   rm -rf "$d"
 done
+# A server update that replaces this container claims it under this lock
+# once no session runs (lib/docker.sh, "Deferred updates"): hold it until
+# this session's daemon runs, and stay away while the container is being
+# replaced (rcc retries once the new one is up). A mark older than 5
+# minutes is left over from an update that failed.
+if command -v flock >/dev/null && [ -d /run ] && [ -w /run ]; then
+  exec 9>/run/rcc-start.lock
+  flock -w 30 9 || true
+fi
+if [ -f /run/rcc-updating ] && [ -z "$(find /run/rcc-updating -mmin +5 2>/dev/null)" ]; then
+  echo "rcc-container-updating" >&2; exit 75
+fi
 mkdir -p "$RUN"
 account_prep
 
@@ -48,5 +60,6 @@ while [ ! -e "$(dirname "$first")" ]; do first=$(dirname "$first"); done
 [ -e "$R" ] || printf '%s\n' "$first" > "$RUN/created"
 printf %s "$LAUNCH_B64" | base64 -d > "$RUN/launch.sh"
 
-R="$R" PROF="$PROF" CFG="$CFG" "$shim" __rcc-daemon "$RUN"
+R="$R" PROF="$PROF" CFG="$CFG" "$shim" __rcc-daemon "$RUN" 9>&-
+exec 9>&-   # the daemon runs (and counts as a session): release the lock
 exec "$shim" __rcc-dial "$RUN/session.sock"

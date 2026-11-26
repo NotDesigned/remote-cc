@@ -8,6 +8,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -64,6 +65,12 @@ func (c *Config) publicHost() string {
 func (c *Config) open() (*remote.Conn, error) {
 	c.defaults()
 	return remote.Open(c.Target)
+}
+
+// workerParam is WORKER_B64: the pending-update worker (server/pending.sh)
+// for this server, which update.sh and others start in the background.
+func (c *Config) workerParam() string {
+	return remote.Vars("WORKER_B64", remote.Base64(remote.Vars("DIR", c.InstallDir)+scripts.Join("lib/docker.sh", "server/pending.sh")))
 }
 
 func (c *Config) initParams() string {
@@ -294,24 +301,43 @@ func UserList(c Config) error {
 		return err
 	}
 	defer conn.Close()
-	out, err := conn.ElevatedOutput(remote.Vars("DIR", c.InstallDir), scripts.Host("server/user-list.sh"))
+	out, err := conn.ElevatedOutput(remote.Vars("DIR", c.InstallDir)+c.workerParam(), scripts.Host("server/user-list.sh"))
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "USER\tCONTAINER\tKEYS\tACTIVE SESSIONS\tDATA")
-	n := 0
-	for _, l := range strings.Split(string(out), "\n") {
+	printUsers(os.Stdout, string(out), c.Dest)
+	return nil
+}
+
+// printUsers prints user-list.sh's output as a table.
+func printUsers(w io.Writer, out, dest string) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "USER\tCONTAINER\tKEYS\tACTIVE SESSIONS\tDATA\tUPDATE")
+	n, pending, egress := 0, false, false
+	for _, l := range strings.Split(out, "\n") {
+		if l == "egress=pending" {
+			egress = true
+		}
 		if v, ok := strings.CutPrefix(l, "user="); ok {
-			fmt.Fprintln(tw, strings.ReplaceAll(v, "|", "\t"))
+			f := strings.Split(v, "|")
+			for len(f) < 6 {
+				f = append(f, "-")
+			}
+			pending = pending || f[5] == "pending"
+			fmt.Fprintln(tw, strings.Join(f, "\t"))
 			n++
 		}
 	}
 	tw.Flush()
 	if n == 0 {
-		fmt.Printf("no users yet: %s server user add %s <name>\n", remote.Prog, c.Dest)
+		fmt.Fprintf(w, "no users yet: %s server user add %s <name>\n", remote.Prog, dest)
 	}
-	return nil
+	if pending {
+		fmt.Fprintln(w, "pending: the container gets the server update once its sessions end")
+	}
+	if egress {
+		fmt.Fprintln(w, "egress host: an update waits for the --rcb sessions to end")
+	}
 }
 
 // UserRebuild recreates a user's container (data, keys and settings kept).
@@ -391,7 +417,7 @@ func Update(c Config, image string, force bool) error {
 	fmt.Fprintf(os.Stderr, "rcc: updating remote-cc server on %s …\n", c.Dest)
 	f, err := conn.Elevated(remote.Vars("DIR", c.InstallDir, "IMAGE", image, "FORCE", remote.Bool(force),
 		"COMPOSE_GW_B64", remote.Base64(deploy.ComposeGateway), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser),
-		"COMPOSE_EGRESS_B64", remote.Base64(deploy.ComposeEgress)),
+		"COMPOSE_EGRESS_B64", remote.Base64(deploy.ComposeEgress))+c.workerParam(),
 		scripts.Host("server/update.sh"))
 	if err != nil {
 		return fmt.Errorf("update failed: %w", err)
@@ -403,15 +429,37 @@ func Update(c Config, image string, force bool) error {
 	switch {
 	case f["uptodate"] == "1":
 		fmt.Printf("remote-cc server is up to date (%s)\n", f["before"])
-	case f["recreated"] != "1":
+	case f["recreated"] != "1" && f["pending"] == "" && !strings.HasPrefix(f["egress"], "pending"):
 		fmt.Printf("remote-cc server is up to date (%s); its compose files were refreshed\n", f["after"])
+	case f["recreated"] != "1":
+		fmt.Printf("remote-cc server update to %s is staged; nothing was recreated yet\n", dash(f["after"]))
 	default:
 		fmt.Printf("remote-cc server updated: %s -> %s\n", dash(f["before"]), dash(f["after"]))
 	}
-	if f["egress"] == "updated" {
-		fmt.Println("egress host updated (new image or compose file)")
-	}
+	printUpdate(os.Stdout, f)
 	return nil
+}
+
+// printUpdate reports what update.sh did beyond the version line: the
+// gateway, users updated now and users and egress host left pending.
+func printUpdate(w io.Writer, f map[string]string) {
+	if f["gateway"] == "updated" {
+		fmt.Fprintln(w, "gateway updated (running sessions reconnect through the new one)")
+	}
+	if u := strings.TrimSpace(f["updated"]); u != "" {
+		fmt.Fprintf(w, "updated: %s\n", u)
+	}
+	for _, p := range strings.Fields(f["pending"]) {
+		name, n, _ := strings.Cut(strings.TrimSuffix(p, ")"), "(")
+		fmt.Fprintf(w, "pending: %s has %s active session(s); its container will update when its sessions end\n", name, dash(n))
+	}
+	switch e := f["egress"]; {
+	case e == "updated":
+		fmt.Fprintln(w, "egress host updated (new image or compose file)")
+	case strings.HasPrefix(e, "pending"):
+		n := strings.TrimSuffix(strings.TrimPrefix(e, "pending("), ")")
+		fmt.Fprintf(w, "pending: the egress host has %s --rcb session(s); it will update when they end\n", dash(n))
+	}
 }
 
 // Remove deletes the gateway and all user containers (data kept unless purge).
@@ -503,7 +551,7 @@ func Egress(c Config, rcbURL, image string) error {
 	defer conn.Close()
 	fmt.Fprintf(os.Stderr, "rcc: installing the egress host on %s …\n", c.Dest)
 	out, err := conn.ElevatedInput(remote.Vars("DIR", c.InstallDir, "URL", base, "EIMAGE", image,
-		"COMPOSE_B64", remote.Base64(deploy.ComposeEgress), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser)),
+		"COMPOSE_B64", remote.Base64(deploy.ComposeEgress), "COMPOSE_USER_B64", remote.Base64(deploy.ComposeUser))+c.workerParam(),
 		scripts.Host("server/egress.sh"), token+"\n")
 	if err != nil {
 		return fmt.Errorf("egress setup failed: %w", err)
@@ -518,7 +566,7 @@ func Egress(c Config, rcbURL, image string) error {
 		fmt.Printf("attached to it: %s\n", a)
 	}
 	if b := strings.TrimSpace(f["busy"]); b != "" {
-		fmt.Printf("still to attach (sessions running): %s\n  when they end, run: %s server update %s\n", b, remote.Prog, c.Dest)
+		fmt.Printf("attached once their sessions end (pending): %s\n", b)
 	}
 	return nil
 }
