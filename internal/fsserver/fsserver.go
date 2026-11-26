@@ -8,6 +8,7 @@
 package fsserver
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"io/fs"
@@ -25,7 +26,7 @@ import (
 // Serve speaks SFTP on rw until EOF. root is the served directory in B's form.
 func Serve(rw io.ReadWriteCloser, root string) error {
 	h := &handler{root: path.Clean(root), goos: runtime.GOOS}
-	srv := sftp.NewRequestServer(rw, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
+	srv := sftp.NewRequestServer(&wholePackets{ReadWriteCloser: rw}, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
 		sftp.WithStartDirectory(h.root))
 	err := srv.Serve()
 	if errors.Is(err, io.EOF) {
@@ -261,4 +262,40 @@ func (l lister) ListAt(dst []fs.FileInfo, off int64) (int, error) {
 		return n, io.EOF
 	}
 	return n, nil
+}
+
+// wholePackets passes each SFTP packet on in one Write. pkg/sftp writes a
+// packet's header and its data in two calls; on the multiplexed stream each
+// Write becomes a packet of its own, and the second can wait a round trip
+// behind the first (Nagle). Packets are length-prefixed (uint32, big
+// endian); bytes always go out in order, a packet is only held until its
+// last byte has been written.
+type wholePackets struct {
+	io.ReadWriteCloser
+	buf []byte
+}
+
+func (w *wholePackets) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	n := 0 // complete packets at the start of buf
+	for len(w.buf)-n >= 4 {
+		size := 4 + int(binary.BigEndian.Uint32(w.buf[n:]))
+		if len(w.buf)-n < size {
+			break
+		}
+		n += size
+	}
+	if n == 0 {
+		return len(p), nil
+	}
+	_, err := w.ReadWriteCloser.Write(w.buf[:n])
+	rest := copy(w.buf, w.buf[n:])
+	w.buf = w.buf[:rest]
+	if cap(w.buf) > 1<<20 {
+		w.buf = append([]byte(nil), w.buf...)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

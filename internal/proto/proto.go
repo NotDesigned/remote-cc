@@ -77,15 +77,16 @@ func (c *Conn) Write(t FrameType, p []byte) error {
 	if len(p) > MaxPayload {
 		return fmt.Errorf("frame too large: %d", len(p))
 	}
-	var hdr [5]byte
-	hdr[0] = byte(t)
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(p)))
+	// One Write per frame: on a multiplexed stream each Write is a packet
+	// of its own, and a lone 5-byte header costs a round trip on links
+	// that delay small packets (Nagle).
+	b := make([]byte, 5+len(p))
+	b[0] = byte(t)
+	binary.BigEndian.PutUint32(b[1:5], uint32(len(p)))
+	copy(b[5:], p)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.rw.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err := c.rw.Write(p)
+	_, err := c.rw.Write(b)
 	return err
 }
 

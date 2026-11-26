@@ -21,6 +21,7 @@
 package session
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -84,6 +85,39 @@ func muxConfig() *yamux.Config {
 	c.MaxStreamWindowSize = 1 << 20 // high-latency links: larger windows
 	c.LogOutput = io.Discard
 	return c
+}
+
+// wholeFrames hands yamux's frames to the stream underneath in one Write
+// each. yamux writes a data frame's 12-byte header and its body in two
+// calls; sent apart, the lone header is a small packet that the next one
+// may wait a round trip behind (Nagle), which doubled the latency of every
+// keystroke and file request. Only yamux's send loop writes, so there is
+// no concurrency here.
+type wholeFrames struct {
+	io.ReadWriteCloser
+	hdr []byte // a data frame's header, held until its body comes
+}
+
+const (
+	yamuxHeaderSize = 12
+	yamuxTypeData   = 0
+)
+
+func (w *wholeFrames) Write(p []byte) (int, error) {
+	if w.hdr == nil && len(p) == yamuxHeaderSize && p[1] == yamuxTypeData && binary.BigEndian.Uint32(p[8:]) > 0 {
+		w.hdr = append([]byte(nil), p...)
+		return len(p), nil
+	}
+	if w.hdr != nil {
+		b := make([]byte, 0, len(w.hdr)+len(p))
+		b = append(append(b, w.hdr...), p...)
+		w.hdr = nil
+		if _, err := w.ReadWriteCloser.Write(b); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	return w.ReadWriteCloser.Write(p)
 }
 
 // sayHello is the client's first line on a new connection.

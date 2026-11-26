@@ -82,7 +82,7 @@ func Run(cfg ClientConfig) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	mux, err := yamux.Client(link, muxConfig())
+	mux, err := yamux.Client(&wholeFrames{ReadWriteCloser: link}, muxConfig())
 	if err != nil {
 		return 1, err
 	}
@@ -264,12 +264,13 @@ func reconnect(cfg ClientConfig, link *resume.Conn, abort, hangup <-chan struct{
 func waitFlushed(link *resume.Conn, done <-chan struct{}, limit time.Duration) {
 	deadline := time.After(limit)
 	for !link.Flushed() {
+		link.RequestAck() // the daemon would otherwise ack only after its ack delay
 		select {
 		case <-done:
 			return
 		case <-deadline:
 			return
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(25 * time.Millisecond):
 		}
 	}
 }

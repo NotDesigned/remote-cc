@@ -28,13 +28,19 @@ const (
 	fResume byte = 1 // 8 bytes: total bytes received
 	fData   byte = 2 // stream bytes
 	fAck    byte = 3 // 8 bytes: total bytes received
-	fPing   byte = 4 // empty
+	fPing   byte = 4 // empty; the other side acks what it has at once
 )
 
 const (
-	maxChunk    = 32 << 10
-	maxFrame    = 1 << 20
-	ackEvery    = 50 * time.Millisecond
+	maxChunk = 32 << 10
+	maxFrame = 1 << 20
+	// ackDelay: data received is acknowledged with the next data going the
+	// other way, or on its own this long after it arrived. A lone ack is a
+	// small packet, and on links that hold small packets back (Nagle; ssh
+	// does not disable it for non-terminal sessions, nor does a ProxyJump
+	// gateway) the reply that follows it waits a round trip: an ack sent
+	// right away made every keystroke's echo take two round trips.
+	ackDelay    = 200 * time.Millisecond
 	ackBytes    = 256 << 10
 	tick        = 50 * time.Millisecond
 	handshakeTO = 20 * time.Second
@@ -90,7 +96,8 @@ type attachment struct {
 	tr       io.ReadWriteCloser
 	sentTo   uint64 // stream offset written on this transport so far
 	ackSent  uint64
-	lastAck  time.Time
+	ackDue   time.Time // when a lone ack is due, if recvd > ackSent
+	pingNow  bool      // send a ping at once (RequestAck)
 	lastSend time.Time
 	lastRecv time.Time
 	stopped  bool
@@ -159,7 +166,7 @@ func (c *Conn) Attach(tr io.ReadWriteCloser) (done <-chan struct{}, err error) {
 	c.buf = c.buf[peer-c.acked:]
 	c.acked = peer
 	now := time.Now()
-	a := &attachment{tr: tr, sentTo: peer, ackSent: recvd, lastAck: now, lastSend: now, lastRecv: now, done: make(chan struct{})}
+	a := &attachment{tr: tr, sentTo: peer, ackSent: recvd, lastSend: now, lastRecv: now, done: make(chan struct{})}
 	c.cur = a
 	c.cond.Broadcast()
 	a.wg.Add(3)
@@ -237,6 +244,9 @@ func (c *Conn) reader(a *attachment, br *bufio.Reader) {
 				c.mu.Unlock()
 				return
 			}
+			if c.recvd == a.ackSent {
+				a.ackDue = a.lastRecv.Add(ackDelay)
+			}
 			c.rbuf = append(c.rbuf, p...)
 			c.recvd += uint64(len(p))
 		case fAck:
@@ -247,6 +257,9 @@ func (c *Conn) reader(a *attachment, br *bufio.Reader) {
 				}
 			}
 		case fPing:
+			if c.recvd != a.ackSent { // the other side waits for an ack
+				a.ackDue = a.lastRecv
+			}
 		default:
 			c.stop(a, fmt.Errorf("resume: unknown frame type %d", typ))
 			c.mu.Unlock()
@@ -278,12 +291,13 @@ func (c *Conn) writer(a *attachment) {
 				data = append([]byte(nil), c.buf[start:end]...)
 				a.sentTo += uint64(len(data))
 			}
-			if c.recvd != a.ackSent && (now.Sub(a.lastAck) >= ackEvery || c.recvd-a.ackSent >= ackBytes) {
+			// Acks ride along with data, else wait (see ackDelay).
+			if c.recvd != a.ackSent && (data != nil || !now.Before(a.ackDue) || c.recvd-a.ackSent >= ackBytes) {
 				ack, ackN = true, c.recvd
-				a.ackSent, a.lastAck = c.recvd, now
+				a.ackSent, a.ackDue = c.recvd, time.Time{}
 			}
-			if now.Sub(a.lastSend) >= c.opt.PingEvery {
-				ping = true
+			if now.Sub(a.lastSend) >= c.opt.PingEvery || a.pingNow {
+				ping, a.pingNow = true, false
 			}
 			if data != nil || ack || ping {
 				a.lastSend = now
@@ -389,6 +403,17 @@ func (c *Conn) Close() error {
 	}
 	c.cond.Broadcast()
 	return nil
+}
+
+// RequestAck asks the other side to acknowledge what it has received now,
+// rather than after its ack delay (see Flushed).
+func (c *Conn) RequestAck() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cur != nil {
+		c.cur.pingNow = true
+		c.cond.Broadcast()
+	}
 }
 
 // Flushed reports whether everything written so far has been acknowledged.

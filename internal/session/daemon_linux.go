@@ -262,7 +262,7 @@ func (d *daemon) transport(c net.Conn) {
 	d.mu.Lock()
 	var newMux *yamux.Session
 	if d.mux == nil {
-		mux, err := yamux.Server(link, muxConfig())
+		mux, err := yamux.Server(&wholeFrames{ReadWriteCloser: link}, muxConfig())
 		if err != nil {
 			d.mu.Unlock()
 			d.end("yamux: " + err.Error())

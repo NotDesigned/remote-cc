@@ -170,7 +170,9 @@ func TestRefusesForeignStream(t *testing.T) {
 	attach(t, a, b)
 	a.Write([]byte("0123456789"))
 	io.ReadFull(b, make([]byte, 10))
-	time.Sleep(200 * time.Millisecond) // the ack reaches a
+	for !a.Flushed() { // the ack reaches a
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	fresh := New(Options{}) // knows nothing of the 10 bytes
 	defer fresh.Close()
