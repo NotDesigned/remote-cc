@@ -214,8 +214,9 @@ func (c *Conn) ElevatedOutput(params, body string) ([]byte, error) {
 }
 
 // ElevatedInput is ElevatedOutput with input on the script's stdin, for
-// secrets that must not appear in a command line. sudo -S reads only the
-// password line, so the script sees just input either way.
+// secrets that must not appear in a command line. lib/root.sh takes the
+// password line itself (sudo gets it through SUDO_ASKPASS, so a wrong one
+// never makes sudo read input), and the script sees just input.
 func (c *Conn) ElevatedInput(params, body, input string) ([]byte, error) {
 	inner := params + body
 	run := func(password string) ([]byte, error) {
@@ -237,6 +238,9 @@ func (c *Conn) ElevatedInput(params, body, input string) ([]byte, error) {
 			return nil, perr
 		}
 		out, err = run(pw)
+		if bytes.Contains(out, []byte("rcc-wrong-sudo-password")) {
+			return nil, fmt.Errorf("wrong sudo password for %s (nothing was run)", c.T.Dest)
+		}
 	}
 	return out, err
 }

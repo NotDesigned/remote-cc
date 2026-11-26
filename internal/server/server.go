@@ -309,6 +309,9 @@ func UserList(c Config) error {
 
 // UserRebuild recreates a user's container (data, keys and settings kept).
 func UserRebuild(c Config, name string, force bool) error {
+	if err := sshconf.ValidUser(name); err != nil {
+		return err
+	}
 	conn, err := c.open()
 	if err != nil {
 		return err
