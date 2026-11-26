@@ -52,7 +52,7 @@ remote-cc server user add root@<服务器> <用户名>             # 建容器�
 remote-cc server user invite root@<服务器> <用户名>          # 再生成一条邀请码（默认 7 天有效，--ttl 可改，最长 30 天）
 remote-cc server user list root@<服务器>                     # 每个服务器用户的容器状态、设备数、活跃会话、数据大小
 remote-cc server user config root@<服务器> <用户名>          # 打印手写 ssh 配置所需的内容
-remote-cc server user rebuild root@<服务器> <用户名>         # 重建这个用户的容器（数据、登录、密钥都保留）；有会话时加 --force
+remote-cc server user rebuild root@<服务器> <用户名>         # 重建这个用户的容器（数据、登录、密钥都保留），也完成等待中的更新；有会话时加 --force
 remote-cc server user remove root@<服务器> <用户名>          # 立即撤销访问，数据保留
 remote-cc server user remove --purge root@<服务器> <用户名>  # 连数据一起删除
 ```
@@ -71,7 +71,13 @@ remote-cc server list                         # 你的电脑管理过的服务�
 remote-cc server list --forget root@<服务器>  # 从列表里删掉已经不存在的服务器
 ```
 
-- 有会话正在进行、更新会断开它时，`server update` 拒绝执行（退出码 5），除非加 `--force`。
+- `server update` 不断开任何会话：
+  - 网关有会话时也重建，会话自动连上新网关，使用者最多看到一行「reconnecting」。
+  - 没有会话的用户容器立即重建；有会话的不动，输出 `pending: <用户名> has N active session(s); its container will update when its sessions end`，命令照常成功。这个用户的会话全部结束后几秒内，宿主机上的后台进程自动重建它；这之前新开的会话还在旧容器里，开头提示一行更新在等待。
+  - 出口主机只在有 `--rcb` 会话时推迟，同样自动完成。
+  - `server user list` 的 UPDATE 列显示 `pending`，出口主机在等待时多一行说明；它还会在后台进程没在运行时（例如宿主机重启后）重新启动它。后台进程的输出在 systemd 日志里（`journalctl -u rcc-pending-<实例名>`），没有 systemd 时在 `<安装目录>/pending-worker.log`。
+  - 加 `--force` 立即重建全部容器，断开正在进行的会话。原理见 [docs/architecture.md](../docs/architecture.md#服务器布局)。
+- `--image` 把网关和所有用户容器换成指定镜像，之后的 `server update` 继续用它。
 - `server update` 会启动停止的容器，检查并修正每个容器到出口主机的挂载，部署了出口主机时也一起更新它（见下文「出口主机」）。
 - 你的电脑在 `~/.ssh/remote-cc/servers.json` 里记住 `server setup`、`server init`、`server migrate`、`server update` 操作过的服务器（ssh 目标、命令行上的 ssh 参数、安装目录），`server remove` 时删除。
 - 镜像里的 Claude Code 版本固定，自动更新已关闭。升级 Claude Code 就执行 `server update`。
@@ -135,12 +141,11 @@ remote-cc server migrate --user owner root@<服务器>
 
 ```sh
 remote-cc server egress --rcb https://browser.example.com root@<服务器>  # 显示连接码和链接，由 RCB 管理员批准
-remote-cc server update root@<服务器>                                    # 有容器还没挂上 socket 时，等会话结束后执行
 ```
 
 - **批准**：出口主机只能由 RCB 的管理员批准，见 [RCB：批准出口主机](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/admin.md#egress-hosts)。批准后主机令牌保存在 `<安装目录>/egress/token`（0600），经 stdin 传入，不出现在命令行里。已经有一个主机令牌时，可以放进环境变量 `RCC_EGRESS_TOKEN` 再执行 `server egress`，跳过批准。令牌种类和撤销见 [RCB：令牌种类和权限](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#tokens)。
-- **重新批准、换 RCB 地址**：再次运行 `server egress`。它重新请求批准，换上新的主机令牌并重建出口主机，旧令牌在 RCB 里断开。它还会给还没挂上 socket 的容器补上挂载；有会话在进行的服务器用户会被列出来，等会话结束后执行 `server update`。
-- **更新**：`server update` 同时更新出口主机，保留它的令牌、RCB 地址和节点上限，只有镜像或 compose 文件变化时才重建，并输出 `egress host updated`。重建会让所有 `--rcb` 会话断网，所以有会话进行时同样拒绝执行，除非加 `--force`。
+- **重新批准、换 RCB 地址**：再次运行 `server egress`。它重新请求批准，换上新的主机令牌并重建出口主机，旧令牌在 RCB 里断开。它还会给还没挂上 socket 的容器补上挂载；有会话在进行的容器像 `server update` 一样等会话结束后自动补上。
+- **更新**：`server update` 同时更新出口主机，保留它的令牌、RCB 地址和节点上限，只有镜像或 compose 文件变化时才重建，并输出 `egress host updated`。重建会让所有 `--rcb` 会话断网，所以有 `--rcb` 会话时推迟到它们结束（见上文「更新」），除非加 `--force`。
 - **节点上限**：每个（服务器用户, RCB 用户, 节点）一个网络命名空间。整台主机最多 64 个，每个服务器用户最多 8 个（`deploy/compose.egress.yml`，`cmd/rcc-egress/main.go`）。服务器用户超出时停止他最久没用的那个，整台主机超出时拒绝新的。要调整，在 `<安装目录>/egress/.env` 里加 `RCC_EGRESS_MAX_NODES=…` 和 `RCC_EGRESS_MAX_NODES_PER_USER=…`，再在该目录执行 `docker compose up -d`（会断开正在用节点的会话）；之后的 `server egress`、`server update` 都会保留这两行。
 - **信任**：出口主机，也就是这台服务器的部署者，能拿到在这里运行过会话的 RCB 用户的节点配置和凭据；`rcb-*` Claude 账号的凭据也保存在服务器用户的容器里。只在使用者信任的服务器上部署出口主机。
 
@@ -152,6 +157,6 @@ remote-cc server update root@<服务器>                                    # �
 | `server setup` 提示网关端口不通 | 在云服务商的安全组里放行网关端口；在放行之前，用户的电脑经宿主机跳转连接。 |
 | `holds a single-container deployment` | 早期版本的单容器部署，按上文「迁移」执行 `server migrate`。 |
 | `a container named rcc-<用户名> already exists` | 同名容器属于别的实例或不是 remote-cc 创建的，换一个用户名（见「用户名」）。 |
-| `active sessions would be disconnected` | 有会话正在进行。等会话结束再执行，或加 `--force` 断开它们。 |
+| `server user list` 里一直是 `pending` | 这个用户还有会话（包括断线后还在等待续接的会话）。等它们结束，或执行 `server user rebuild --force` 立即更新并断开它们。 |
 | 用户报告 `The server's gateway could not reach your container` | 这个用户的容器停了。执行 `remote-cc server update root@<服务器>`。 |
 | `remote-claude-browser rejected this egress host` | 主机令牌被撤销，或批准它的管理员不再是启用的管理员。重新执行 `server egress` 并批准。 |

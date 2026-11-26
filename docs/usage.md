@@ -99,7 +99,7 @@ remote-cc version --check          # 当前版本和最新版本
 remote-cc update --version vX.Y.Z  # 换成指定版本
 ```
 
-Claude Code 本身装在服务器的镜像里，由部署者执行 `remote-cc server update` 升级。升级时要注意的变化见 [CHANGELOG.md](../CHANGELOG.md)。
+Claude Code 本身装在服务器的镜像里，由部署者执行 `remote-cc server update` 升级。升级时要注意的变化见 [CHANGELOG.md](../CHANGELOG.md)。升级不会打断正在进行的会话：你的容器要等你在上面的会话全部结束后才换成新版本，这之前开始会话时会提示 `a server update for your container is waiting`；恰好在容器更换的那几秒里开始的会话，会提示一行，等新容器起来后自动在上面启动。
 
 ## 电脑上的文件
 
