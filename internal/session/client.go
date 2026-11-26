@@ -37,9 +37,16 @@ type ClientConfig struct {
 	Hangup <-chan struct{}
 	Grace  time.Duration
 	Logf   func(string, ...any)
-	// Backoff is the wait before each reconnect attempt; default 1s, 2s, 4s,
-	// 8s, then 10s.
+	// Backoff is the wait before each reconnect attempt; default none for
+	// the first, then 1s, 2s, 4s, 8s, then 10s.
 	Backoff func(attempt int) time.Duration
+	// Reconnecting is called once the connection is lost, before the first
+	// reconnect attempt, with the reason (resume.ErrSilent: nothing was
+	// heard, so the shared ssh connection is most likely dead too).
+	Reconnecting func(reason error)
+	// NetworkEvery is how often this computer's network addresses are
+	// checked for a change (default 2s; negative: never).
+	NetworkEvery time.Duration
 }
 
 // StartError: the first connection did not reach a session daemon (the
@@ -66,22 +73,48 @@ func Run(cfg ClientConfig) (int, error) {
 		cfg.Grace = DefaultGrace
 	}
 	if cfg.Backoff == nil {
-		cfg.Backoff = func(n int) time.Duration { return min(time.Second<<min(n, 4), 10*time.Second) }
+		cfg.Backoff = func(n int) time.Duration {
+			if n == 0 {
+				return 0
+			}
+			return min(time.Second<<min(n-1, 4), 10*time.Second)
+		}
+	}
+	if cfg.NetworkEvery == 0 {
+		cfg.NetworkEvery = 2 * time.Second
 	}
 	tr, err := cfg.Connect(true)
 	if err != nil {
 		return 1, err
 	}
-	if err := sayHello(tr, cfg.Token); err != nil {
-		tr.Close()
-		return 1, &StartError{err}
-	}
 	link := resume.New(resume.Options{})
 	defer link.Close()
-	done, err := link.Attach(tr)
+	done, err := attachHello(link, tr, cfg.Token)
 	if err != nil {
-		return 1, err
+		return 1, &StartError{err}
 	}
+	// A new network (Wi-Fi switch, VPN) probably took the connection
+	// with it: check it now rather than after the silence timeout.
+	netChanged := make(chan struct{}, 1)
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go watchNetwork(stopWatch, cfg.NetworkEvery, func() {
+		cfg.Logf("network changed")
+		link.Probe()
+		select {
+		case netChanged <- struct{}{}:
+		default:
+		}
+	})
+	status := &statusLine{out: cfg.Stderr, width: func() int {
+		if cfg.Terminal != nil {
+			if s, ok := cfg.Terminal.Size(); ok {
+				return int(s.Cols)
+			}
+		}
+		return 0
+	}}
+	stdout := status.writer(cfg.Stdout)
 	mux, err := yamux.Client(&wholeFrames{ReadWriteCloser: link}, muxConfig())
 	if err != nil {
 		return 1, err
@@ -176,7 +209,7 @@ func Run(cfg ClientConfig) (int, error) {
 			}
 			switch f.Type {
 			case tData:
-				cfg.Stdout.Write(f.Payload)
+				stdout.Write(f.Payload)
 			case tExit:
 				var e Exit
 				json.Unmarshal(f.Payload, &e)
@@ -204,12 +237,17 @@ func Run(cfg ClientConfig) (int, error) {
 			mu.Lock()
 			disconnected = true
 			mu.Unlock()
-			fmt.Fprint(cfg.Stderr, "\r\nrcc: connection lost; reconnecting (Ctrl-C ends the session) …\r\n")
-			next, err := reconnect(cfg, link, abort, hangup)
+			cfg.Logf("connection lost: %v", link.LastError())
+			next, err := reconnect(cfg, link, status, abort, hangup, netChanged)
 			if err != nil {
 				return 1, err
 			}
 			done = next
+			if status.end() {
+				// The status took a line of the screen: have Claude
+				// Code draw its interface again.
+				pc.Write(tRedraw, nil)
+			}
 			mu.Lock()
 			disconnected = false
 			select { // a Ctrl-C that lost the race to the reconnect
@@ -221,40 +259,73 @@ func Run(cfg ClientConfig) (int, error) {
 	}
 }
 
-// reconnect attaches new connections until one resumes the stream.
-func reconnect(cfg ClientConfig, link *resume.Conn, abort, hangup <-chan struct{}) (<-chan struct{}, error) {
-	giveUp := time.Now().Add(cfg.Grace + time.Minute)
+// reconnect attaches new connections until one resumes the stream. The
+// first attempt goes at once, and a network change skips the wait before
+// the next. The status line tells how it goes once the outage lasts.
+func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, hangup, netChanged <-chan struct{}) (<-chan struct{}, error) {
+	start := time.Now()
+	giveUp := start.Add(cfg.Grace + time.Minute)
+	const hint = " … (typing is kept; Ctrl-C ends the session)"
+	status.begin(statusShowAfter)
+	status.set("connection lost; reconnecting" + hint)
+	gaveUp := func() (<-chan struct{}, error) {
+		status.final("gave up reconnecting")
+		return nil, fmt.Errorf("gave up reconnecting; the session on the server ends by itself within %v", cfg.Grace)
+	}
+	if cfg.Reconnecting != nil {
+		cfg.Reconnecting(link.LastError())
+	}
+	type result struct {
+		done <-chan struct{}
+		err  error
+	}
 	for attempt := 0; ; attempt++ {
+		if wait := cfg.Backoff(attempt); wait > 0 {
+			select {
+			case <-abort:
+				return gaveUp()
+			case <-hangup:
+				return nil, errors.New("connection lost while ending the session")
+			case <-netChanged:
+			case <-time.After(wait):
+			}
+		}
+		if attempt > 0 {
+			status.set(fmt.Sprintf("connection lost %v ago; reconnecting (attempt %d)%s",
+				time.Since(start).Round(time.Second), attempt+1, hint))
+		}
+		res := make(chan result, 1)
+		go func() {
+			tr, err := cfg.Connect(false)
+			if err != nil {
+				res <- result{err: err}
+				return
+			}
+			// A frozen server may accept the connection and say nothing:
+			// the resume handshake gives up after 20s.
+			done, err := attachHello(link, tr, cfg.Token)
+			res <- result{done, err}
+		}()
+		var r result
 		select {
-		case <-abort:
-			return nil, fmt.Errorf("gave up reconnecting; the session on the server ends by itself within %v", cfg.Grace)
+		case r = <-res:
+		case <-abort: // the attempt goes on; Run's end closes link
+			return gaveUp()
 		case <-hangup:
 			return nil, errors.New("connection lost while ending the session")
-		case <-time.After(cfg.Backoff(attempt)):
 		}
-		tr, err := cfg.Connect(false)
-		if err == nil {
-			// A frozen server may accept the connection and say nothing.
-			t := time.AfterFunc(20*time.Second, func() { tr.Close() })
-			err = sayHello(tr, cfg.Token)
-			t.Stop()
-			if err != nil {
-				tr.Close()
-			}
+		if r.err == nil {
+			cfg.Logf("reconnected after %d attempt(s), %v", attempt+1, time.Since(start).Round(time.Millisecond))
+			return r.done, nil
 		}
-		if err == nil {
-			var done <-chan struct{}
-			if done, err = link.Attach(tr); err == nil {
-				cfg.Logf("reconnected after %d attempt(s)", attempt+1)
-				return done, nil
-			}
-		}
-		cfg.Logf("reconnect attempt %d: %v", attempt+1, err)
-		if errors.Is(err, ErrEnded) {
-			return nil, err
+		cfg.Logf("reconnect attempt %d: %v", attempt+1, r.err)
+		if errors.Is(r.err, ErrEnded) {
+			status.final("the session on the server has ended")
+			return nil, r.err
 		}
 		if time.Now().After(giveUp) {
-			return nil, fmt.Errorf("could not reconnect: %w", err)
+			status.final("could not reconnect")
+			return nil, fmt.Errorf("could not reconnect: %w", r.err)
 		}
 	}
 }

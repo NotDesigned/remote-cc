@@ -31,6 +31,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"remote-cc/internal/proto"
+	"remote-cc/internal/resume"
 )
 
 // Stream kinds: the first byte of a stream opened here.
@@ -47,6 +48,7 @@ const (
 	tHangup proto.FrameType = 4 // here → daemon: end Claude Code (SIGHUP)
 	tExit   proto.FrameType = 5 // JSON Exit, daemon → here
 	tError  proto.FrameType = 6 // message, daemon → here: the session could not start
+	tRedraw proto.FrameType = 7 // here → daemon: have Claude Code draw its interface again
 )
 
 // Open starts the terminal: its size and the environment Claude Code gets
@@ -123,19 +125,41 @@ func (w *wholeFrames) Write(p []byte) (int, error) {
 	return w.ReadWriteCloser.Write(p)
 }
 
-// sayHello is the client's first line on a new connection.
-func sayHello(rw io.ReadWriter, token string) error {
-	if _, err := io.WriteString(rw, helloPrefix+token+"\n"); err != nil {
-		return err
+// attachHello says hello on a new connection and resumes link on it. The
+// resume handshake follows the hello without waiting for the answer, a
+// round trip less to start and to reconnect: the daemon (and __rcc-dial)
+// read the hello line byte by byte, so what follows waits in the
+// connection for the daemon's resume handshake. A refusal fails the attach.
+func attachHello(link *resume.Conn, tr io.ReadWriteCloser, token string) (<-chan struct{}, error) {
+	if _, err := io.WriteString(tr, helloPrefix+token+"\n"); err != nil {
+		tr.Close()
+		return nil, err
 	}
-	line, err := readLine(rw, 256)
-	if err != nil {
-		return fmt.Errorf("no answer from the session on the server: %w", err)
+	return link.Attach(&helloReply{ReadWriteCloser: tr})
+}
+
+// helloReply reads the answer to the hello before the stream.
+type helloReply struct {
+	io.ReadWriteCloser
+	answered bool
+	err      error
+}
+
+func (h *helloReply) Read(p []byte) (int, error) {
+	if !h.answered {
+		h.answered = true
+		line, err := readLine(h.ReadWriteCloser, 256)
+		switch {
+		case err != nil:
+			h.err = fmt.Errorf("no answer from the session on the server: %w", err)
+		case line != "ok":
+			h.err = helloError(strings.TrimPrefix(line, "error "))
+		}
 	}
-	if line != "ok" {
-		return helloError(strings.TrimPrefix(line, "error "))
+	if h.err != nil {
+		return 0, h.err
 	}
-	return nil
+	return h.ReadWriteCloser.Read(p)
 }
 
 // readLine reads one line byte by byte, so nothing after it is consumed

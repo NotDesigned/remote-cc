@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -185,6 +187,87 @@ func (c *Conn) Facts(script string) (map[string]string, error) {
 		return nil, fmt.Errorf("ssh %s failed: %w%s", c.T.Dest, err, Hint(errBuf.String()))
 	}
 	return ParseFacts(out), nil
+}
+
+// StartPipe starts cmd (an ssh command) with its stdio as the returned
+// pipe; closing the pipe ends it.
+func StartPipe(cmd *exec.Cmd, stderr io.Writer) (*Pipe, error) {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	procjob.TrackProcess(cmd.Process.Pid)
+	return newPipe(cmd, out, in), nil
+}
+
+// Pipe is a running command's stdout and stdin.
+type Pipe struct {
+	r    *bufio.Reader
+	in   io.WriteCloser
+	cmd  *exec.Cmd
+	done chan struct{} // closed when the command has ended
+	err  error         // its Wait error, once done
+	once sync.Once
+}
+
+func newPipe(cmd *exec.Cmd, out io.Reader, in io.WriteCloser) *Pipe {
+	br, ok := out.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReaderSize(out, 64<<10)
+	}
+	p := &Pipe{r: br, in: in, cmd: cmd, done: make(chan struct{})}
+	go func() {
+		// What matters is that the command ended (a transport that
+		// ended); output still unread then may be lost.
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
+	return p
+}
+
+func (p *Pipe) Read(b []byte) (int, error)  { return p.r.Read(b) }
+func (p *Pipe) Write(b []byte) (int, error) { return p.in.Write(b) }
+
+// Close closes stdin; the command gets a second to end before it is killed.
+func (p *Pipe) Close() error {
+	p.once.Do(func() {
+		p.in.Close()
+		// Not waited for: the resumable stream closes its transport
+		// while it holds its lock.
+		go func() {
+			select {
+			case <-p.done:
+			case <-time.After(time.Second):
+				p.cmd.Process.Kill()
+			}
+		}()
+	})
+	return nil
+}
+
+// DropMaster ends this Conn's shared ssh connection, if one is up. Once a
+// session's connection has been lost, the shared one is most likely dead
+// too, and new ssh calls through it would hang until ssh notices (up to
+// 15s); without it they connect afresh (and become the new shared one).
+func (c *Conn) DropMaster() {
+	if c.ctl == "" {
+		return
+	}
+	if _, err := os.Stat(c.ctl); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "exit", c.T.Dest)
+	exec.CommandContext(ctx, c.T.SSH, args...).Run()
 }
 
 // Hint explains ssh errors that have a known remote-cc cause.

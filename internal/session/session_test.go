@@ -346,3 +346,149 @@ func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(p)))
 	return len(p), nil
 }
+
+// The resume handshake goes right behind the hello; a refused hello still
+// fails the start, with the daemon's reason.
+func TestRefusedHello(t *testing.T) {
+	h, _ := newHarness(t, `printf 'ready\n'; sleep 60`, time.Minute)
+	h.start(time.Minute)
+	h.waitOutput("ready")
+	_, err := Run(ClientConfig{
+		Token:    "other",
+		Connect:  h.connect,
+		Files:    func(rw io.ReadWriteCloser) error { return nil },
+		Commands: echo,
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+		Stderr:   io.Discard,
+	})
+	var se *StartError
+	if !errors.As(err, &se) || !strings.Contains(err.Error(), "wrong session token") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+type fakeTerm struct{ size Size }
+
+func (f fakeTerm) MakeRaw() (func(), error) { return func() {}, nil }
+func (f fakeTerm) Size() (Size, bool)       { return f.size, true }
+func (f fakeTerm) Resized() <-chan struct{} { return nil }
+func (h *harness) outputSince(n int) string { return h.out.String()[n:] }
+func (h *harness) outputLen() int           { return len(h.out.String()) }
+func (h *harness) connectUnless(down *atomic.Bool) func(bool) (io.ReadWriteCloser, error) {
+	return func(first bool) (io.ReadWriteCloser, error) {
+		if down.Load() {
+			return nil, errors.New("network down")
+		}
+		return h.connect(first)
+	}
+}
+
+// winchScript prints the terminal size whenever it changes.
+const winchScript = `trap 'echo "size=$(stty size)"' WINCH; printf 'ready\n'; while :; do if read a; then printf 'got:%s\n' "$a"; fi; done`
+
+// A short drop: the first attempt goes at once, Reconnecting is called once,
+// what was typed arrives, and the screen is left alone: no status, no
+// redraw (Claude Code's interface would leave a copy of itself behind).
+func TestShortDropLeavesScreen(t *testing.T) {
+	h, _ := newHarness(t, winchScript, time.Minute)
+	stdinR, stdinW := io.Pipe()
+	var stderr syncBuffer
+	var drops atomic.Int32
+	go Run(ClientConfig{
+		Token:        "tok",
+		Connect:      h.connect,
+		Files:        func(rw io.ReadWriteCloser) error { io.Copy(io.Discard, rw); return nil },
+		Commands:     echo,
+		Stdin:        stdinR,
+		Stdout:       &h.out,
+		Stderr:       &stderr,
+		Terminal:     fakeTerm{Size{Rows: 24, Cols: 80}},
+		Grace:        time.Minute,
+		Reconnecting: func(error) { drops.Add(1) },
+	})
+	h.waitOutput("ready")
+	mark := h.outputLen()
+	h.cut()
+	go stdinW.Write([]byte("typed while away\n"))
+	start := time.Now()
+	h.waitOutput("got:typed while away")
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("reconnected after %v; the first attempt should go at once", d)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if drops.Load() != 1 {
+		t.Errorf("Reconnecting called %d times", drops.Load())
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("status printed for a short drop: %q", s)
+	}
+	if out := h.outputSince(mark); strings.Contains(out, "size=") {
+		t.Errorf("the terminal was resized: %q", out)
+	}
+}
+
+// A longer outage: one status line, never a newline, shorter than the
+// width; erased once the connection is back, and then a redraw that changes
+// the height for a moment, never the width.
+func TestOutageStatusAndRedraw(t *testing.T) {
+	h, _ := newHarness(t, winchScript, time.Minute)
+	stdinR, _ := io.Pipe()
+	var stderr syncBuffer
+	var down atomic.Bool
+	go Run(ClientConfig{
+		Token:    "tok",
+		Connect:  h.connectUnless(&down),
+		Files:    func(rw io.ReadWriteCloser) error { io.Copy(io.Discard, rw); return nil },
+		Commands: echo,
+		Stdin:    stdinR,
+		Stdout:   &h.out,
+		Stderr:   &stderr,
+		Terminal: fakeTerm{Size{Rows: 24, Cols: 40}},
+		Grace:    time.Minute,
+		Backoff:  func(int) time.Duration { return 100 * time.Millisecond },
+	})
+	h.waitOutput("ready")
+	mark := h.outputLen()
+	down.Store(true)
+	h.cut()
+	time.Sleep(1500 * time.Millisecond)
+	s := stderr.String()
+	if !strings.HasPrefix(s, "\rrcc: connection lost") || strings.Contains(s, "\n") {
+		t.Fatalf("status %q", s)
+	}
+	for _, line := range strings.Split(s, "\r") {
+		if l := len([]rune(strings.TrimSuffix(line, "\x1b[K"))); l >= 40 {
+			t.Errorf("status line %q is %d wide, the terminal 40", line, l)
+		}
+	}
+	down.Store(false)
+	h.waitOutput("size=24 40")
+	if out := h.outputSince(mark); !strings.Contains(out, "size=23 40") || strings.Count(out, "size=") != 2 {
+		t.Errorf("redraw: %q", out)
+	}
+	if s := stderr.String(); !strings.HasSuffix(s, "\r\x1b[K") || strings.Contains(s, "\n") {
+		t.Errorf("status not erased: %q", s)
+	}
+}
+
+func TestStatusLine(t *testing.T) {
+	var out bytes.Buffer
+	s := &statusLine{out: &out, width: func() int { return 10 }}
+	s.begin(time.Hour)
+	s.set("lost")
+	if s.end() || out.Len() != 0 {
+		t.Fatalf("a short outage printed %q", out.String())
+	}
+	s.begin(0)
+	s.set("connection lost")
+	w := s.writer(&out)
+	w.Write([]byte("X"))
+	s.set("again")
+	if !s.end() {
+		t.Fatal("end: the status was shown")
+	}
+	if want := "\rrcc: conn\x1b[K\r\x1b[KX\rrcc: agai\x1b[K\r\x1b[K"; out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
+	}
+}

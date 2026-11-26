@@ -280,10 +280,9 @@ func (d *daemon) transport(c net.Conn) {
 	n := d.attaches
 	d.detachedAt = time.Time{}
 	d.mu.Unlock()
+	// No redraw here: the stream resumed where it was, so the screen is
+	// as Claude Code left it (rcc asks for one if it printed on it).
 	d.logf("connected (%d)", n)
-	if n > 1 {
-		go d.redraw()
-	}
 	<-done
 	d.mu.Lock()
 	if !link.Attached() {
@@ -498,6 +497,8 @@ func (d *daemon) terminal(st *yamux.Stream) {
 				}
 			case tHangup:
 				syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
+			case tRedraw:
+				go d.redraw()
 			}
 		}
 	}()
@@ -531,8 +532,11 @@ func (d *daemon) waitClosed(st *yamux.Stream) {
 	}
 }
 
-// redraw makes Claude Code repaint after a reconnect: a size change sends
-// it SIGWINCH.
+// redraw makes Claude Code repaint (rcc's status line took a line of the
+// screen): a size change sends it SIGWINCH. Only the height changes, one
+// row for a moment: Ink erases its last frame by counting lines, and a
+// different width wraps them differently, leaving a copy of the frame on
+// the screen.
 func (d *daemon) redraw() {
 	d.mu.Lock()
 	m := d.term
@@ -541,12 +545,15 @@ func (d *daemon) redraw() {
 		return
 	}
 	ws, err := unix.IoctlGetWinsize(int(m.Fd()), unix.TIOCGWINSZ)
-	if err != nil || ws.Col < 2 {
+	if err != nil || ws.Row < 2 {
 		return
 	}
-	setSize(m, Size{Rows: ws.Row, Cols: ws.Col - 1})
+	setSize(m, Size{Rows: ws.Row - 1, Cols: ws.Col})
 	time.Sleep(150 * time.Millisecond)
-	setSize(m, Size{Rows: ws.Row, Cols: ws.Col})
+	// Unless rcc sent a new size meanwhile.
+	if now, err := unix.IoctlGetWinsize(int(m.Fd()), unix.TIOCGWINSZ); err == nil && now.Row == ws.Row-1 && now.Col == ws.Col {
+		setSize(m, Size{Rows: ws.Row, Cols: ws.Col})
+	}
 }
 
 // end stops everything and removes the session's directory.

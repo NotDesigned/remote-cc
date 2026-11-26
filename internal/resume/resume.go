@@ -28,7 +28,7 @@ const (
 	fResume byte = 1 // 8 bytes: total bytes received
 	fData   byte = 2 // stream bytes
 	fAck    byte = 3 // 8 bytes: total bytes received
-	fPing   byte = 4 // empty; the other side acks what it has at once
+	fPing   byte = 4 // empty, or 1 byte: please ack at once (a probe)
 )
 
 const (
@@ -49,10 +49,19 @@ const (
 // ErrClosed is returned by Read, Write and Attach after Close.
 var ErrClosed = errors.New("resume: connection closed")
 
+// ErrSilent ends a transport on which nothing was heard for too long (see
+// LastError): the network, or the ssh connection carrying it, is gone.
+var ErrSilent = errors.New("resume: nothing heard from the other side")
+
 // Options tune a Conn. Zero values mean the defaults.
 type Options struct {
 	PingEvery time.Duration // default 5s
 	DeadAfter time.Duration // default 15s
+	// ProbeWait: after Probe, a sleep of this computer (noticed as the wall
+	// clock running ahead of the monotonic one) or a stall of this process
+	// (an overloaded computer), the transport is given this long to answer
+	// a probe before it is closed (ErrSilent). Default 5s.
+	ProbeWait time.Duration
 	// MaxUnacked is how many written bytes may wait for an acknowledgement
 	// before Write blocks (also the receive buffer limit). Default 8 MiB.
 	MaxUnacked int
@@ -72,8 +81,18 @@ type Conn struct {
 	rbuf  []byte // received, not yet read
 	recvd uint64 // total received
 
-	cur    *attachment
-	closed bool
+	cur     *attachment
+	closed  bool
+	lastErr error // why the last transport ended
+
+	clock func() time.Time // tests: a clock that jumps
+}
+
+func (c *Conn) now() time.Time {
+	if c.clock != nil {
+		return c.clock()
+	}
+	return time.Now()
 }
 
 // New returns a Conn with no transport attached.
@@ -87,6 +106,9 @@ func New(opt Options) *Conn {
 	if opt.MaxUnacked == 0 {
 		opt.MaxUnacked = 8 << 20
 	}
+	if opt.ProbeWait == 0 {
+		opt.ProbeWait = 5 * time.Second
+	}
 	c := &Conn{opt: opt}
 	c.cond = sync.NewCond(&c.mu)
 	return c
@@ -97,7 +119,10 @@ type attachment struct {
 	sentTo   uint64 // stream offset written on this transport so far
 	ackSent  uint64
 	ackDue   time.Time // when a lone ack is due, if recvd > ackSent
-	pingNow  bool      // send a ping at once (RequestAck)
+	pingNow  bool      // send a probe ping at once
+	ackNow   bool      // the other side asked for an ack
+	probeAt  time.Time // a probe ping went out; nothing heard since
+	holding  bool      // the reader holds a frame back (this side reads slowly)
 	lastSend time.Time
 	lastRecv time.Time
 	stopped  bool
@@ -112,6 +137,7 @@ func (c *Conn) stop(a *attachment, err error) {
 		return
 	}
 	a.stopped, a.err = true, err
+	c.lastErr = err
 	a.tr.Close()
 	close(a.done)
 	if c.cur == a {
@@ -165,7 +191,7 @@ func (c *Conn) Attach(tr io.ReadWriteCloser) (done <-chan struct{}, err error) {
 	}
 	c.buf = c.buf[peer-c.acked:]
 	c.acked = peer
-	now := time.Now()
+	now := c.now()
 	a := &attachment{tr: tr, sentTo: peer, ackSent: recvd, lastSend: now, lastRecv: now, done: make(chan struct{})}
 	c.cur = a
 	c.cond.Broadcast()
@@ -233,13 +259,18 @@ func (c *Conn) reader(a *attachment, br *bufio.Reader) {
 			c.mu.Unlock()
 			return
 		}
-		a.lastRecv = time.Now()
+		a.lastRecv = c.now()
 		switch typ {
 		case fData:
-			// Hold back while the reader of this Conn is far behind.
+			// Hold back while the reader of this Conn is far behind. The
+			// other side's pings then wait unread behind this frame:
+			// that is no silence (see ticker).
+			a.holding = true
 			for len(c.rbuf) >= c.opt.MaxUnacked && !a.stopped && !c.closed {
 				c.cond.Wait()
 			}
+			a.holding = false
+			a.lastRecv = c.now()
 			if a.stopped || c.closed {
 				c.mu.Unlock()
 				return
@@ -257,8 +288,8 @@ func (c *Conn) reader(a *attachment, br *bufio.Reader) {
 				}
 			}
 		case fPing:
-			if c.recvd != a.ackSent { // the other side waits for an ack
-				a.ackDue = a.lastRecv
+			if len(p) > 0 { // a probe: answer at once
+				a.ackNow = true
 			}
 		default:
 			c.stop(a, fmt.Errorf("resume: unknown frame type %d", typ))
@@ -278,13 +309,13 @@ func (c *Conn) writer(a *attachment) {
 		var data []byte
 		var ack bool
 		var ackN uint64
-		var ping bool
+		var ping, probe bool
 		for {
 			if a.stopped {
 				c.mu.Unlock()
 				return
 			}
-			now := time.Now()
+			now := c.now()
 			if a.sentTo < c.written {
 				start := a.sentTo - c.acked
 				end := min(start+maxChunk, uint64(len(c.buf)))
@@ -292,12 +323,14 @@ func (c *Conn) writer(a *attachment) {
 				a.sentTo += uint64(len(data))
 			}
 			// Acks ride along with data, else wait (see ackDelay).
-			if c.recvd != a.ackSent && (data != nil || !now.Before(a.ackDue) || c.recvd-a.ackSent >= ackBytes) {
+			if a.ackNow || c.recvd != a.ackSent && (data != nil || !now.Before(a.ackDue) || c.recvd-a.ackSent >= ackBytes) {
 				ack, ackN = true, c.recvd
-				a.ackSent, a.ackDue = c.recvd, time.Time{}
+				a.ackSent, a.ackDue, a.ackNow = c.recvd, time.Time{}, false
 			}
-			if now.Sub(a.lastSend) >= c.opt.PingEvery || a.pingNow {
-				ping, a.pingNow = true, false
+			if a.pingNow {
+				ping, probe, a.pingNow = true, true, false
+			} else if now.Sub(a.lastSend) >= c.opt.PingEvery {
+				ping = true
 			}
 			if data != nil || ack || ping {
 				a.lastSend = now
@@ -315,7 +348,11 @@ func (c *Conn) writer(a *attachment) {
 			err = writeFrame(bw, fAck, u64(ackN))
 		}
 		if err == nil && ping {
-			err = writeFrame(bw, fPing, nil)
+			var p []byte
+			if probe {
+				p = []byte{1}
+			}
+			err = writeFrame(bw, fPing, p)
 		}
 		if err == nil {
 			err = bw.Flush()
@@ -334,19 +371,72 @@ func (c *Conn) ticker(a *attachment) {
 	defer a.wg.Done()
 	t := time.NewTicker(tick)
 	defer t.Stop()
+	last := c.now()
 	for {
 		select {
 		case <-a.done:
 			return
 		case <-t.C:
 		}
+		now := c.now()
+		gap := now.Sub(last)
+		// The monotonic clock stops while the computer sleeps (Linux,
+		// macOS, Windows), the wall clock does not: after a sleep, the
+		// connection is probably gone, so find out now rather than after
+		// DeadAfter.
+		slept := now.Round(0).Sub(last.Round(0))-gap > time.Second
+		// This ticker did not run for a while: the computer is overloaded
+		// (or the process was stopped). What the other side sent may be
+		// waiting unread, so the silence proves nothing; ask instead.
+		stalled := gap > time.Second
+		last = now
 		c.mu.Lock()
-		if time.Since(a.lastRecv) > c.opt.DeadAfter {
-			c.stop(a, fmt.Errorf("resume: nothing heard from the other side for %v", c.opt.DeadAfter))
+		if slept || stalled {
+			c.probe(a)
+		}
+		switch {
+		case !a.probeAt.IsZero() && !a.lastRecv.Before(a.probeAt):
+			a.probeAt = time.Time{} // answered
+		case !a.probeAt.IsZero():
+			// A probe is out: its answer decides.
+			if now.Sub(a.probeAt) > c.opt.ProbeWait {
+				c.stop(a, fmt.Errorf("%w for %v after a probe", ErrSilent, c.opt.ProbeWait))
+			}
+		case a.holding:
+			// This side reads slowly; the other side's frames wait.
+		case now.Sub(a.lastRecv) > c.opt.DeadAfter:
+			c.stop(a, fmt.Errorf("%w for %v", ErrSilent, c.opt.DeadAfter))
 		}
 		c.cond.Broadcast()
 		c.mu.Unlock()
 	}
+}
+
+// probe sends a ping that the other side answers at once; c.mu is held.
+func (c *Conn) probe(a *attachment) {
+	a.pingNow = true
+	if a.probeAt.IsZero() {
+		a.probeAt = c.now()
+	}
+	c.cond.Broadcast()
+}
+
+// Probe checks the transport: if the other side does not answer within
+// ProbeWait, the transport is closed (ErrSilent). For when the network may
+// have changed.
+func (c *Conn) Probe() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cur != nil {
+		c.probe(c.cur)
+	}
+}
+
+// LastError tells why the last transport ended (ErrSilent: nothing heard).
+func (c *Conn) LastError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastErr
 }
 
 // Read reads stream bytes, waiting (also across reconnects) until some arrive.

@@ -25,12 +25,10 @@ import (
 	"io/fs"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -42,6 +40,7 @@ import (
 	"remote-cc/internal/procjob"
 	"remote-cc/internal/rcb"
 	"remote-cc/internal/remote"
+	"remote-cc/internal/resume"
 	"remote-cc/internal/scripts"
 	live "remote-cc/internal/session"
 )
@@ -333,7 +332,7 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 		if !first { // the network may still be half there
 			opts = []string{"-o", "ConnectTimeout=15"}
 		}
-		return startPipe(s.conn.Script(false, opts, script), stderr)
+		return remote.StartPipe(s.conn.Script(false, opts, script), stderr)
 	}
 
 	// Raw mode carries Ctrl-C to Claude Code; without a terminal, keep it
@@ -353,55 +352,21 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 		Env:      live.LocalEnv(),
 		Hangup:   s.hangup,
 		Logf:     logger.Printf,
+		Reconnecting: func(reason error) {
+			// Nothing heard: the shared ssh connection most likely went
+			// down with the session's, and new ssh calls through it would
+			// wait for it until ssh gives up on it (15 s). Other reasons
+			// (the server side closed the connection) leave it alone.
+			if errors.Is(reason, resume.ErrSilent) {
+				s.conn.DropMaster()
+			}
+		},
 	})
 	var se *live.StartError
 	if errors.As(err, &se) && strings.TrimSpace(startErr.String()) != "" {
 		err = fmt.Errorf("starting the session on the server failed:\n%s", strings.TrimSpace(startErr.String()))
 	}
 	return code, err
-}
-
-// startPipe starts an ssh command whose stdio is a connection to the
-// session daemon. Closing it ends that ssh.
-func startPipe(cmd *exec.Cmd, stderr io.Writer) (io.ReadWriteCloser, error) {
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	procjob.TrackProcess(cmd.Process.Pid)
-	p := &pipe{Reader: out, in: in, cmd: cmd, done: make(chan struct{})}
-	go func() { cmd.Wait(); close(p.done) }()
-	return p, nil
-}
-
-type pipe struct {
-	io.Reader
-	in   io.WriteCloser
-	cmd  *exec.Cmd
-	done chan struct{}
-	once sync.Once
-}
-
-func (p *pipe) Write(b []byte) (int, error) { return p.in.Write(b) }
-
-func (p *pipe) Close() error {
-	p.once.Do(func() {
-		p.in.Close()
-		select {
-		case <-p.done:
-		case <-time.After(time.Second):
-			p.cmd.Process.Kill()
-		}
-	})
-	return nil
 }
 
 func openLog(logf func(string, ...any)) *os.File {
