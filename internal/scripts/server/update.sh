@@ -90,13 +90,11 @@ if [ "$gw_changed" = 1 ]; then
 fi
 # Users: recreated now when no session runs in them (claim_user turns new
 # sessions away meanwhile), else marked pending; --force recreates them all.
-updated=""; pending=""
+updated=""; pending=""; failed=""
 for n in $changed; do
   printf '%s\n' "$user_new" > "users/$n/compose.yml"
-  if [ "$FORCE" = 1 ]; then
-    recreate_user "$n" && updated="$updated $n"
-  elif a=$(claim_user "$n"); then
-    recreate_user "$n" && updated="$updated $n"
+  if [ "$FORCE" = 1 ] || a=$(claim_user "$n"); then
+    if recreate_user "$n"; then updated="$updated $n"; else failed="$failed rcc-$n"; fi
   else
     mark_pending "$n"; pending="$pending $n(${a:-?})"
   fi
@@ -123,3 +121,4 @@ start_worker
 docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/NotDesigned/remote-cc" >/dev/null 2>&1 || true
 echo "after=$(docker exec "$GW" claude --version 2>/dev/null | head -1)"
 if [ "$ids0" != "$(ids)" ]; then echo "recreated=1"; fi
+if [ -n "$failed" ]; then echo "rcc: recreating failed:$failed (see the docker output above)" >&2; exit 4; fi
