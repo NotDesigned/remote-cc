@@ -6,9 +6,10 @@
 # and a busy egress host are marked pending and recreated by the worker
 # (WORKER_B64, server/pending.sh) once their sessions end.
 : "${DIR:?}" "${IMAGE?}" "${FORCE:?}" "${COMPOSE_GW_B64:?}" "${COMPOSE_USER_B64:?}" "${COMPOSE_EGRESS_B64:?}"
+want=$IMAGE   # load_server sets IMAGE to the configured one
 load_server
 cd "$DIR" || exit 3
-if [ -n "$IMAGE" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$IMAGE" >> .env; fi
+if [ -n "$want" ]; then sed -i '/^RCC_IMAGE=/d' .env; echo "RCC_IMAGE=$want" >> .env; fi
 image=$(sed -n 's/^RCC_IMAGE=//p' .env)
 grep -q '^COMPOSE_PROJECT_NAME=' .env || echo "COMPOSE_PROJECT_NAME=$NET" >> .env
 users=$(user_names)
@@ -28,6 +29,10 @@ for n in $users; do
     sed -i '/^RCC_EGRESS_DIR=/d' "users/$n/.env"; echo "RCC_EGRESS_DIR=$DATA/egress/users/$n" >> "users/$n/.env"
   fi
   mkdir -p "$DATA/egress/users/$n"
+  # Users run the server's image (a new one with --image).
+  if ! grep -qxF "RCC_IMAGE=$image" "users/$n/.env"; then
+    sed -i '/^RCC_IMAGE=/d' "users/$n/.env"; echo "RCC_IMAGE=$image" >> "users/$n/.env"
+  fi
 done
 # The egress host (server egress), if installed, keeps its token, URL and .env.
 ename=""

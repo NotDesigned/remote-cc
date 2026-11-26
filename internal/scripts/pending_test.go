@@ -91,6 +91,23 @@ func TestUpdateAppliesPendingWhenIdle(t *testing.T) {
 	}
 }
 
+// --image switches the gateway and every user (their .env names it too).
+func TestUpdateSwitchesImage(t *testing.T) {
+	h := newFakeHost(t, "alice")
+	h.write(filepath.Join(h.fake, "img/srv_2"), "sha:2")
+	p := updateParams()
+	p[0] = "IMAGE=srv:2"
+	out, err := h.run("server/update.sh", "", p...)
+	if err != nil || !strings.Contains(out, "updated=alice") {
+		t.Fatalf("%q %v", out, err)
+	}
+	for _, f := range []string{".env", "users/alice/.env"} {
+		if env := h.read(filepath.Join(h.dir, f)); strings.Count(env, "RCC_IMAGE=") != 1 || !strings.Contains(env, "RCC_IMAGE=srv:2\n") {
+			t.Errorf("%s: %q", f, env)
+		}
+	}
+}
+
 func TestUpdateForceRecreatesBusyUsers(t *testing.T) {
 	h := newFakeHost(t, "alice")
 	h.write(filepath.Join(h.fake, "c/rcc-alice/sessions"), "1\n")
