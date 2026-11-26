@@ -98,16 +98,25 @@ type session struct {
 
 	hangup   chan struct{}      // closed on SIGTERM/SIGHUP: end Claude Code
 	prefetch <-chan grantResult // --rcb: the first grant, fetched during the probe
-
+	// held is the probe's ssh session, waiting to start the session on (nil
+	// once used, and for account commands).
+	held *remote.Held
 }
 
-func newSession(cfg Config) (*session, error) {
+// newSession probes the server. With hold, the probe's ssh session stays
+// open to start the session on (s.held; close ends it if unused).
+func newSession(cfg Config, hold bool) (*session, error) {
 	conn, err := remote.Open(cfg.Target)
 	if err != nil {
 		return nil, err
 	}
 	s := &session{cfg: cfg, conn: conn, id: remote.RandHex(6)}
-	f, err := conn.Facts(scripts.Get("client/probe.sh"))
+	var f map[string]string
+	if hold {
+		f, s.held, err = conn.FactsHeld(scripts.Get("client/probe.sh"))
+	} else {
+		f, err = conn.Facts(scripts.Get("client/probe.sh"))
+	}
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -118,14 +127,22 @@ func newSession(cfg Config) (*session, error) {
 	s.facts = f
 	conn.Logf("server: %s/%s uid=%s claude=%s", f["os"], f["arch"], f["uid"], f["claude"])
 	if f["claude"] == "" {
-		conn.Close()
+		s.close()
 		return nil, s.claudeMissing()
 	}
 	if err := s.resolveAccount(); err != nil {
-		conn.Close()
+		s.close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// close ends the held probe session, if unused, and the connection.
+func (s *session) close() {
+	if s.held != nil {
+		s.held.Close()
+	}
+	s.conn.Close()
 }
 
 // Run runs an interactive Claude Code session.
@@ -170,11 +187,11 @@ func Run(cfg Config) (int, error) {
 		prefetch = firstGrant(cfg)
 	}
 
-	s, err := newSession(cfg)
+	s, err := newSession(cfg, true)
 	if err != nil {
 		return 1, err
 	}
-	defer s.conn.Close()
+	defer s.close()
 	s.local, s.remote = local, pathmap.ToRemote(runtime.GOOS, local)
 	s.prefetch = prefetch
 	if err := <-shellOK; err != nil {
@@ -327,6 +344,11 @@ func (s *session) start(ag *agent.Agent, token string, logger *log.Logger, logFi
 			stderr = io.MultiWriter(&startErr, logFile)
 		} else {
 			logger.Printf("reconnecting")
+		}
+		if first && s.held != nil { // the probe's ssh session waits for it
+			h := s.held
+			s.held = nil
+			return h.Start(script, stderr)
 		}
 		var opts []string
 		if !first { // the network may still be half there

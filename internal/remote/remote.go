@@ -189,6 +189,95 @@ func (c *Conn) Facts(script string) (map[string]string, error) {
 	return ParseFacts(out), nil
 }
 
+// factsEnd ends the facts of a held probe (FactsHeld).
+const factsEnd = "rcc-facts-end"
+
+// heldLoader runs the script sent as one base64 line on stdin (gzipped
+// after a "z"), once the facts are out; the rest of stdin is the script's
+// (sh's read takes no more than that line). No line (rcc gave up): nothing
+// more runs.
+const heldLoader = `IFS= read -r rcc_s || exit 0
+case $rcc_s in
+z*) eval "$(printf %s "${rcc_s#z}" | base64 -d | gzip -dc)" ;;
+*) eval "$(printf %s "$rcc_s" | base64 -d)" ;;
+esac`
+
+// FactsHeld is Facts on an ssh session that then waits for the next script
+// (Held.Start). The script that follows the facts, such as a session start,
+// skips a new ssh channel (two round trips) or, without multiplexing
+// (Windows), a new ssh connection.
+func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
+	cmd := c.Script(false, nil, script+"\necho "+factsEnd+"\n"+heldLoader)
+	var errBuf bytes.Buffer
+	sw := &switchWriter{w: io.MultiWriter(os.Stderr, &errBuf)}
+	cmd.Stderr = sw
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+	procjob.TrackProcess(cmd.Process.Pid)
+	h := &Held{p: newPipe(cmd, bufio.NewReader(out), in), stderr: sw}
+	var facts bytes.Buffer
+	for {
+		line, rerr := h.p.r.ReadString('\n')
+		if strings.TrimRight(line, "\r\n") == factsEnd {
+			break
+		}
+		facts.WriteString(line)
+		if rerr != nil {
+			h.p.Close()
+			<-h.p.done
+			err := h.p.err
+			if err == nil {
+				err = errors.New("the server closed the connection")
+			}
+			sw.set(io.Discard)
+			return nil, nil, fmt.Errorf("ssh %s failed: %w%s", c.T.Dest, err, Hint(errBuf.String()))
+		}
+	}
+	f := ParseFacts(facts.Bytes())
+	h.gzip = f["bin_gzip"] != ""
+	return f, h, nil
+}
+
+// Held is an ssh session waiting for its next script (FactsHeld).
+type Held struct {
+	p      *Pipe
+	stderr *switchWriter
+	once   sync.Once
+	gzip   bool // the server has gzip (fact bin_gzip)
+}
+
+// Start runs script on the held session; its stdio is then the returned
+// pipe, its stderr goes to stderr. A Held starts one script.
+func (h *Held) Start(script string, stderr io.Writer) (*Pipe, error) {
+	err := errors.New("remote: held session already used")
+	h.once.Do(func() {
+		h.stderr.set(stderr)
+		line := Base64(script)
+		if h.gzip && len(script) > 4<<10 { // a session start: about a third
+			line = "z" + gzipBase64(script)
+		}
+		_, err = io.WriteString(h.p.in, line+"\n")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return h.p, nil
+}
+
+// Close ends the held session if no script was started.
+func (h *Held) Close() {
+	h.once.Do(func() { h.p.Close() })
+}
+
 // StartPipe starts cmd (an ssh command) with its stdio as the returned
 // pipe; closing the pipe ends it.
 func StartPipe(cmd *exec.Cmd, stderr io.Writer) (*Pipe, error) {
@@ -268,6 +357,25 @@ func (c *Conn) DropMaster() {
 	defer cancel()
 	args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "exit", c.T.Dest)
 	exec.CommandContext(ctx, c.T.SSH, args...).Run()
+}
+
+// switchWriter is a writer whose destination can change.
+type switchWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *switchWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.w.Write(p)
+	return len(p), nil
+}
+
+func (s *switchWriter) set(w io.Writer) {
+	s.mu.Lock()
+	s.w = w
+	s.mu.Unlock()
 }
 
 // Hint explains ssh errors that have a known remote-cc cause.

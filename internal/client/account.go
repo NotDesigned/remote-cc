@@ -65,7 +65,7 @@ func (s *session) resolveAccount() error {
 //	token-clear  remove it
 //	accounts     list the accounts and their login state
 func Account(cfg Config, action string, args []string) (int, error) {
-	s, err := newSession(cfg)
+	s, err := newSession(cfg, false)
 	if err != nil {
 		return 1, err
 	}
