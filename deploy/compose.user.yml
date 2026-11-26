@@ -7,10 +7,19 @@ services:
     hostname: ${RCC_NAME}
     restart: unless-stopped
     init: true
+    # sshfs (the project dir), unshare/nsenter (private mount namespaces)
+    # and setns (--rcb sessions' network) need FUSE, SYS_ADMIN and mount,
+    # which Docker's default AppArmor profile denies. This weakens the
+    # container boundary: see docs/architecture.md (security model).
     devices:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
+    # Not needed: raw packets (spoofing other containers on the shared
+    # network) and device nodes (in dirs the host also reads).
+    cap_drop:
+      - NET_RAW
+      - MKNOD
     security_opt:
       - apparmor:unconfined
     volumes:

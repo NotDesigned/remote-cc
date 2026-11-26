@@ -115,7 +115,9 @@ rcc-egress ◄── 每个服务器用户自己的 socket ── rcc-<用户名
 
 - **服务器必须可信**：容器里的 Claude（以及容器里的 root）对电脑拥有完整的执行和读写权限，这本来就是这个工具的目的。
 - **服务器用户之间**：每个服务器用户有自己的容器，也就有自己的 root、Claude 账号和历史档案。网关只放行用户自己的容器，用户容器只接受这个用户的公钥。同一个服务器用户的几台电脑共用一个容器，Claude 账号分开只是为了不混用，不是安全边界。
-- **容器权限**：sshfs 需要 `/dev/fuse`、`CAP_SYS_ADMIN`，并且要关掉 Docker 默认的 AppArmor 限制（默认规则禁止 mount）。不用 `--privileged`，不挂载宿主机的其他目录。
+- **容器权限**：sshfs（项目目录）、`unshare`/`nsenter`（私有挂载命名空间）和进入 `--rcb` 会话的网络命名空间，都需要 `/dev/fuse`、`CAP_SYS_ADMIN`，并且要关掉 Docker 默认的 AppArmor 限制（默认规则禁止 mount）。不需要的 `NET_RAW`（伪造同一网络上别的容器的报文）和 `MKNOD`（创建设备文件）被去掉；不用 `--privileged`，不挂载宿主机的其他目录。
+- **容器边界因此变弱**：用户是容器里的 root，又有 `CAP_SYS_ADMIN`、没有 AppArmor，容器和宿主机之间只剩 Docker 默认的 seccomp 规则和命名空间。内核漏洞或配置不当（例如宿主机用 cgroup v1）时，用户有可能逃出容器、成为宿主机的 root。所以服务器用户之间的隔离只适合彼此大致可信的人（同一个团队），不能当作抵御恶意用户的安全边界。要更强的隔离，部署者可以给 Docker 开启 `userns-remap`（容器里的 root 映射成宿主机上的普通用户；数据目录的属主要随之改成映射后的用户，remote-cc 不自动处理），或者给不可信的人一台单独的宿主机。
+- **宿主机上的脚本不碰容器能写的文件**：管理命令以宿主机 root 执行，而用户的公钥目录、`/root` 和 `/etc/ssh/keys` 是挂进容器、容器里的 root 能写的宿主机目录（网关的目录同理）。这些目录里的文件只在对应容器里经 `docker exec` 读写，宿主机只创建挂载点本身，所以容器里放的符号链接、FIFO 或设备文件只能指向容器自己的文件（`internal/scripts/lib/docker.sh`）。
 - **邀请码**：一次性、有时限；网关一半和容器一半分开存放，未使用的邀请码不能打开任何转发。用户自己发的邀请码由 `rcc-self-invite` 写入，只接受调用者自己的账号和一把 ed25519 公钥，有效期和未用邀请码的数量都有上限（见 [docs/usage.md](usage.md#设备)）。
 - **出口主机**：能拿到在这里运行过会话的 RCB 用户的节点配置和凭据；`rcb-*` 账号的 Claude 凭据保存在用户容器里。两种令牌各自能做什么、怎样撤销，见 [RCB：令牌种类和权限](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#tokens) 和 [RCB：撤销](https://github.com/NotDesigned/remote-claude-browser/blob/main/docs/remote-cc.md#revocation)。
 

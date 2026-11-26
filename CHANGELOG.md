@@ -4,6 +4,36 @@
 
 0.6.0 及更早的条目是 2026-11-25 根据 git 标签和提交说明补写的；那时的命令名是旧名字，按原样写出。
 
+## 未发布（0.8.1）
+
+### 新增
+
+无
+
+### 变更
+
+- 安全修复：服务器用户在自己的容器里是 root，能在挂进容器的宿主机目录（公钥目录、`/root`、`/etc/ssh/keys`）里放符号链接，让以宿主机 root 运行的 `server user add`、`server user invite`、`server user config`、`server user list` 写入、改权限或读出宿主机上的任意文件。现在这些目录里的文件只在对应的容器里经 `docker exec` 读写，宿主机只创建挂载点本身；网关的用户名单改为整体替换，只接受合法的用户名。`server user invite` 和 `server user config` 遇到停止的容器会先启动它。邀请码的过期时间改用容器里的时钟（sshd 按它判断）。
+- 安全修复：`device join` 以前只检查邀请码里的用户名。伪造的邀请码能经主机名里的换行往 ssh 配置里写入 `ProxyCommand`（加入时就会执行，并留在 `~/.ssh/remote-cc/config` 里），经主机公钥里的换行往 `known_hosts` 写入 `@cert-authority`，或经 id 指定临时文件的路径。现在邀请码的每一项都要通过检查：主机名或 IP、端口范围、能解析的单行主机公钥、16 位十六进制 id、一把能解析的私钥、别名和过期时间；`server setup` 写 ssh 配置前也同样检查服务器的回答。加入时只在一个单独的 `known_hosts` 里信任邀请码的主机公钥，成功后才写进 `~/.ssh/known_hosts`。
+- 安全修复：`rcb login` 和 `server egress` 不再接受 `http://` 的 RCB 地址（令牌会明文传输），`localhost` 和回环地址除外；以前存下的 `http://` 地址要用 `https://` 重新 `rcb login`。也不再跟随转到 `http://` 的重定向。
+- 安全加固：用户容器去掉了用不到的 `NET_RAW` 和 `MKNOD` 权限。为什么还需要 `CAP_SYS_ADMIN`、`/dev/fuse` 和关闭 AppArmor，以及这对隔离意味着什么，见 [docs/architecture.md](docs/architecture.md#安全模型)。
+- 修复：宿主机的 sudo 需要密码而密码输错时，sudo 会把 `server egress` 的主机令牌当成下一次密码读走。现在密码经 `SUDO_ASKPASS` 交给 sudo，输错时什么都不执行，并提示「wrong sudo password」。
+- 修复：会话的第一次连接在恢复数据流之前断开时，之后的重连永远等不到会话；在重连成功的一瞬间按 Ctrl-C，键盘输入会再也到不了 Claude Code。
+- 修复：重新 `device join` 或 `server setup` 写入某个主机的指纹时，替换它以前的指纹（以前旧指纹继续被信任）；`server remove` 同时删除电脑上指向这台服务器的 `HOST` 条目和主机指纹；重新配置 `HOST`、或用 `device remove --force` 删除这台电脑的密钥后，结束仍在复用的 ssh 连接。
+- 修复：`~/.ssh/config`、`~/.ssh/remote-cc/config`、`known_hosts`、`rcb.json`、`rcb-dirs.json` 和 `servers.json` 改为加锁、写完整的临时文件再改名替换，几个 remote-cc 同时运行时不再互相覆盖；`rcb-dirs.json` 损坏时不再被当成空文件覆盖，`rcb use` 会报错并留一份副本。
+- 会话日志 `last.log` 只有自己能读（权限 0600），命令里 `token=`、`password=` 之类后面的值和常见的密钥被略去；Windows 上同时运行两个会话时，后开的那个写自己的日志，不再清空前一个的。
+- `server user invite --ttl` 最长 30 天；`server user rebuild` 检查用户名。
+- 会话开始时清理残留运行目录、管理命令统计活动会话时，进程号要属于这个会话的守护进程才算数（重启后进程号会被复用）。
+- 管理命令的脚本改为经 stdin 发给服务器，不再受 Windows 命令行长度的限制。
+
+### 移除
+
+无
+
+### 升级步骤
+
+- `remote-cc server update <服务器>`：用户容器按新的 compose 文件重建（去掉 `NET_RAW`、`MKNOD`），有会话时会拒绝，等会话结束或加 `--force`。
+- 用 `http://` 地址连接过 RCB 的电脑：用 `https://` 地址重新 `remote-cc rcb login`。
+
 ## 0.8.0（2026-11-25）
 
 ### 新增

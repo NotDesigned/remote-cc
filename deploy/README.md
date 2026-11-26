@@ -32,7 +32,7 @@ remote-cc server setup --install-docker ubuntu@<服务器>  # 全新的机器，
 
 常用的调整：`--port` 改网关端口（宿主机原有的 22 端口不受影响），`--bind 127.0.0.1` 让网关不对外开放、只能经宿主机跳转，`--data` 和 `--install-dir` 改目录（见下文「目录」），`--name` 在同一台宿主机上按不同名字、端口和目录运行多个实例，`--public-host` 指定用户实际连接的地址（在宿主机上经 localhost 操作时需要）。只装网关、不创建服务器用户，用 `remote-cc server init`。
 
-- **只有 sudo 账号时**：登录账号不是 root 时，remote-cc 自动用 sudo 提权。免密 sudo 不需要任何操作；需要密码时，remote-cc 在你的电脑上以不回显的方式询问，经 stdin 交给 `sudo -S`，密码不会出现在命令行或日志里。日常连接用的是网关和容器自己的 sshd，和宿主机能不能用 root 登录无关。
+- **只有 sudo 账号时**：登录账号不是 root 时，remote-cc 自动用 sudo 提权。免密 sudo 不需要任何操作；需要密码时，remote-cc 在你的电脑上以不回显的方式询问，经 stdin 传到宿主机、再经 `SUDO_ASKPASS` 交给 sudo，密码不会出现在命令行或日志里；密码错误时什么都不执行。日常连接用的是网关和容器自己的 sshd，和宿主机能不能用 root 登录无关。
 - **公网端口**：Docker 发布的端口不经过 ufw，网关一启动就暴露在公网上。云服务商有安全组时，要在那里放行这个端口。
 
 <a id="user-names"></a>
@@ -49,7 +49,7 @@ remote-cc server setup --install-docker ubuntu@<服务器>  # 全新的机器，
 
 ```sh
 remote-cc server user add root@<服务器> <用户名>             # 建容器，输出一条一次性邀请码，私下发给对方
-remote-cc server user invite root@<服务器> <用户名>          # 再生成一条邀请码（默认 7 天有效，--ttl 可改）
+remote-cc server user invite root@<服务器> <用户名>          # 再生成一条邀请码（默认 7 天有效，--ttl 可改，最长 30 天）
 remote-cc server user list root@<服务器>                     # 每个服务器用户的容器状态、设备数、活跃会话、数据大小
 remote-cc server user config root@<服务器> <用户名>          # 打印手写 ssh 配置所需的内容
 remote-cc server user rebuild root@<服务器> <用户名>         # 重建这个用户的容器（数据、登录、密钥都保留）；有会话时加 --force
@@ -83,7 +83,7 @@ remote-cc server remove root@<服务器>          # 删除网关、所有容器�
 remote-cc server remove --purge root@<服务器>  # 连数据一起删除
 ```
 
-出口主机的令牌随安装目录一起删除；记得在 RCB 里断开这台出口主机。
+出口主机的令牌随安装目录一起删除；记得在 RCB 里断开这台出口主机。你的电脑上指向这台服务器的 `HOST`（`~/.ssh/remote-cc/config` 里的条目）和它们在 `known_hosts` 里的主机指纹也一并删除。
 
 ## 迁移
 

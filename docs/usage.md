@@ -108,9 +108,9 @@ Claude Code 本身装在服务器的镜像里，由部署者执行 `remote-cc se
 | 这台电脑的历史档案名 | `<用户配置目录>/rcc/profile` |
 | 和 RCB 的连接 | `<用户配置目录>/rcc/rcb.json`（权限 0600） |
 | 各目录用哪个配置和服务器（`rcb use`） | `<用户配置目录>/rcc/rcb-dirs.json` |
-| 会话日志 | `<用户缓存目录>/rcc/last.log`，上一次会话的在同一目录的 `prev.log` |
+| 会话日志 | `<用户缓存目录>/rcc/last.log`（权限 0600），上一次会话的在同一目录的 `prev.log`；Windows 上同时有两个会话时，后开的那个写 `session-<进程号>.log` |
 
-`<用户配置目录>` 在 Linux 上是 `~/.config`，macOS 上是 `~/Library/Application Support`，Windows 上是 `%APPDATA%`；`<用户缓存目录>` 在 Linux 上是 `~/.cache`，macOS 上是 `~/Library/Caches`，Windows 上是 `%LOCALAPPDATA%`（Go 的 `os.UserConfigDir`、`os.UserCacheDir`）。会话日志记录了 Claude 在电脑上执行的命令和用到的 shell。
+`<用户配置目录>` 在 Linux 上是 `~/.config`，macOS 上是 `~/Library/Application Support`，Windows 上是 `%APPDATA%`；`<用户缓存目录>` 在 Linux 上是 `~/.cache`，macOS 上是 `~/Library/Caches`，Windows 上是 `%LOCALAPPDATA%`（Go 的 `os.UserConfigDir`、`os.UserCacheDir`）。会话日志记录了 Claude 在电脑上执行的命令（`token=`、`password=` 之类后面的值和常见的密钥会被略去）和用到的 shell。
 
 <a id="rcb"></a>
 
@@ -119,7 +119,7 @@ Claude Code 本身装在服务器的镜像里，由部署者执行 `remote-cc se
 连接 [Remote Claude Browser（RCB）](https://github.com/NotDesigned/remote-claude-browser)后，`remote-cc --rcb <配置>` 以该浏览器配置的身份运行 Claude Code：用这个配置的 Claude 账号，全部网络流量经这个配置的节点出去，和网页版是同一个出口和时区。前提是服务器上已经部署了出口主机（部署者执行 `server egress`，见 [deploy/README.md](../deploy/README.md#egress-host)）。
 
 ```sh
-remote-cc rcb login https://browser.example.com    # 终端显示连接码和链接，你本人在 RCB 里批准这台电脑
+remote-cc rcb login https://browser.example.com    # 终端显示连接码和链接，你本人在 RCB 里批准这台电脑（地址必须是 https://，只有 localhost 可以用 http://）
 remote-cc rcb profiles                             # 你的浏览器配置：Claude 账号、节点、出口、时区
 cd ~/proj && remote-cc rcb use                     # 列出你的配置，选一个；这个目录及子目录默认用它和服务器
 remote-cc account login                            # 第一次：在该配置的浏览器里一键登录 Claude
