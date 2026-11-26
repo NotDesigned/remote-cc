@@ -220,15 +220,17 @@ func (c *Conn) ElevatedOutput(params, body string) ([]byte, error) {
 func (c *Conn) ElevatedInput(params, body, input string) ([]byte, error) {
 	inner := params + body
 	run := func(password string) ([]byte, error) {
-		cmd := c.Script(false, nil, params+Vars("SELF_B64", Base64(inner), "HAVE_PASS", boolStr(password != ""))+body)
+		// The script (it carries compose files, and itself again for
+		// sudo) goes as the first stdin line, not on the command line:
+		// Windows limits a command line to 32767 characters.
+		script := params + Vars("SELF_B64", Base64(inner), "HAVE_PASS", boolStr(password != "")) + body
+		cmd := exec.Command(c.T.SSH, append(c.args(false, nil), c.T.Dest, stdinLoader)...)
 		cmd.Stderr = os.Stderr
-		stdin := input
+		stdin := gzipBase64(script) + "\n"
 		if password != "" {
-			stdin = password + "\n" + input
+			stdin += password + "\n"
 		}
-		if stdin != "" {
-			cmd.Stdin = strings.NewReader(stdin)
-		}
+		cmd.Stdin = strings.NewReader(stdin + input)
 		return cmd.Output()
 	}
 	out, err := run("")
@@ -253,11 +255,19 @@ func wrap(script string) string {
 	if len(plain) <= maxPlainCommand {
 		return plain
 	}
+	return `sh -c 'eval "$(printf %s ` + gzipBase64(script) + ` | base64 -d | gzip -dc)"'`
+}
+
+// stdinLoader runs the script sent as the first stdin line (gzipBase64);
+// the rest of stdin is the script's. sh's read takes no more than that line.
+const stdinLoader = `sh -c 'IFS= read -r rcc_s && eval "$(printf %s "$rcc_s" | base64 -d | gzip -dc)"'`
+
+func gzipBase64(script string) string {
 	var b bytes.Buffer
 	w, _ := gzip.NewWriterLevel(&b, gzip.BestCompression)
 	w.Write([]byte(script))
 	w.Close()
-	return `sh -c 'eval "$(printf %s ` + base64.StdEncoding.EncodeToString(b.Bytes()) + ` | base64 -d | gzip -dc)"'`
+	return base64.StdEncoding.EncodeToString(b.Bytes())
 }
 
 // maxPlainCommand is the longest command sent uncompressed.
