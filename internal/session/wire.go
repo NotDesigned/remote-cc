@@ -82,7 +82,10 @@ func muxConfig() *yamux.Config {
 	c.ConnectionWriteTimeout = 365 * 24 * time.Hour
 	c.StreamOpenTimeout = 0
 	c.StreamCloseTimeout = 10 * time.Minute
-	c.MaxStreamWindowSize = 1 << 20 // high-latency links: larger windows
+	// A stream may have this much in flight: 1 MiB capped a stream at about
+	// 3.5 MiB/s at 50 ms round trip (a window update reaches the sender
+	// only after half the window was read); 4 MiB reaches ssh's own speed.
+	c.MaxStreamWindowSize = 4 << 20
 	c.LogOutput = io.Discard
 	return c
 }
