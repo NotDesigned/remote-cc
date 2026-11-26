@@ -31,7 +31,7 @@ Claude Code 的工具分两类，所以只替换 shell 不够：
 - **一条通道上的三种流**：remote-cc 和守护进程之间是一条可续接字节流（`internal/resume`），上面用 yamux 分出多条流：终端（claude 的伪终端，带窗口尺寸和退出码）、文件（sshfs 的 SFTP），以及每条命令一条流。
 - **文件**：`sshfs -o slave` 用 stdin/stdout 跑 SFTP 协议，remote-cc 用自己进程内的 SFTP 服务回答，所以电脑上不需要 sshd，也不需要 sftp-server（「反向 sshfs」）。SFTP 服务只暴露项目目录（按路径校验，拒绝 `..` 越界），这是防误操作，不是安全边界。
 - **命令**：rcc-shim 连到守护进程的命令 socket，守护进程为它开一条流，电脑上的命令服务执行。连接要带这个会话的一次性 token。
-- **ssh 连接复用**：Linux 和 macOS 上，同一个目标的 ssh 调用经 ControlMaster 复用一条连接；这条连接在最后一次使用后保留 10 分钟（`internal/remote` 的 `MasterPersist`），下一次启动或命令不用重新握手。Windows 自带的 OpenSSH 不支持复用，一次会话建立两条连接（探测、会话）。
+- **ssh 连接复用**：Linux 和 macOS 上，同一个目标的 ssh 调用经 ControlMaster 复用一条连接；这条连接在最后一次使用后保留 10 分钟（`internal/remote` 的 `MasterPersist`），下一次启动或命令不用重新握手。这条连接可能已经失效却还在（电脑睡眠或换了网络），ssh 要等 15 秒才放弃它：所以经它的探测 4 秒内没有回答，就结束它，重新连接。探测用的 ssh 会话在输出事实之后不退出，接着运行会话的启动脚本（经 stdin 送过去），会话不用再开一个 ssh 通道；Windows 自带的 OpenSSH 不支持复用，因此一次会话只建立一条连接。
 
 ## 一次会话
 

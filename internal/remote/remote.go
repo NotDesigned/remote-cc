@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
@@ -45,6 +46,8 @@ type Conn struct {
 	T   Target
 	tmp string // private temp dir; also holds the control socket
 	ctl string // ControlPath, "" without multiplexing
+	// masterUp: a shared connection was up at Open (it may still be dead).
+	masterUp bool
 }
 
 // Open prepares a Conn. Close it to end the multiplexed master connection.
@@ -59,7 +62,7 @@ func Open(t Target) (*Conn, error) {
 	procjob.RemoveDirOnExit(tmp)
 	c := &Conn{T: t, tmp: tmp}
 	if runtime.GOOS != "windows" { // Windows OpenSSH has no multiplexing
-		c.ctl = controlPath(t)
+		c.ctl, c.masterUp = controlPath(t)
 		if c.ctl == "" { // no usable shared path: this run's own connection
 			c.ctl = filepath.Join(tmp, "c")
 		}
@@ -74,23 +77,25 @@ const MasterPersist = 10 * time.Minute
 // controlPath is the shared connection's socket for t, in a private
 // directory under the user cache. A socket left by a master that died is
 // removed first: ssh would otherwise not multiplex at all.
-func controlPath(t Target) string {
-	p := controlPathName(t)
+func controlPath(t Target) (p string, up bool) {
+	p = controlPathName(t)
 	if p == "" {
-		return ""
+		return "", false
 	}
 	dir := filepath.Dir(p)
 	if os.MkdirAll(dir, 0o700) != nil {
-		return ""
+		return "", false
 	}
 	os.Chmod(dir, 0o700)
 	if _, err := os.Stat(p); err == nil {
 		args := append(append([]string{}, t.Args...), "-o", "ControlPath="+p, "-O", "check", t.Dest)
 		if exec.Command(t.SSH, args...).Run() != nil {
 			os.Remove(p)
+		} else {
+			up = true
 		}
 	}
-	return p
+	return p, up
 }
 
 // StopMaster ends the shared connection to t, if one is up. A connection
@@ -206,7 +211,31 @@ esac`
 // (Held.Start). The script that follows the facts, such as a session start,
 // skips a new ssh channel (two round trips) or, without multiplexing
 // (Windows), a new ssh connection.
+//
+// A shared ssh connection can be up but dead (its network went away while
+// this computer slept, or with a Wi-Fi switch): ssh would wait for it until
+// it gives up on it (15 s) and then fail. So through a shared connection,
+// the facts must come within MasterWait; otherwise the shared connection is
+// ended and the probe runs again on a new one.
 func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
+	if c.masterUp {
+		f, h, err := c.factsHeld(script, MasterWait)
+		if !errors.Is(err, errMasterSlow) {
+			return f, h, err
+		}
+		c.Logf("the shared ssh connection did not answer within %v; connecting afresh", MasterWait)
+		c.DropMaster()
+	}
+	return c.factsHeld(script, 0)
+}
+
+// MasterWait is how long a shared ssh connection has to answer the probe.
+// Through a live one the probe takes a few round trips.
+var MasterWait = 4 * time.Second
+
+var errMasterSlow = errors.New("the shared ssh connection did not answer")
+
+func (c *Conn) factsHeld(script string, wait time.Duration) (map[string]string, *Held, error) {
 	cmd := c.Script(false, nil, script+"\necho "+factsEnd+"\n"+heldLoader)
 	var errBuf bytes.Buffer
 	sw := &switchWriter{w: io.MultiWriter(os.Stderr, &errBuf)}
@@ -224,6 +253,17 @@ func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
 	}
 	procjob.TrackProcess(cmd.Process.Pid)
 	h := &Held{p: newPipe(cmd, bufio.NewReader(out), in), stderr: sw}
+	var slow atomic.Bool
+	if wait > 0 {
+		t := time.AfterFunc(wait, func() {
+			slow.Store(true)
+			cmd.Process.Kill()
+			// ssh handed its stdout to the shared connection's process,
+			// which keeps it open: stop reading here.
+			out.Close()
+		})
+		defer t.Stop()
+	}
 	var facts bytes.Buffer
 	for {
 		line, rerr := h.p.r.ReadString('\n')
@@ -233,6 +273,10 @@ func (c *Conn) FactsHeld(script string) (map[string]string, *Held, error) {
 		facts.WriteString(line)
 		if rerr != nil {
 			h.p.Close()
+			if slow.Load() {
+				sw.set(io.Discard)
+				return nil, nil, errMasterSlow
+			}
 			<-h.p.done
 			err := h.p.err
 			if err == nil {
@@ -357,6 +401,9 @@ func (c *Conn) DropMaster() {
 	defer cancel()
 	args := append(append([]string{}, c.T.Args...), "-o", "ControlPath="+c.ctl, "-O", "exit", c.T.Dest)
 	exec.CommandContext(ctx, c.T.SSH, args...).Run()
+	// Whatever became of it, new ssh calls make a new one.
+	os.Remove(c.ctl)
+	c.masterUp = false
 }
 
 // switchWriter is a writer whose destination can change.

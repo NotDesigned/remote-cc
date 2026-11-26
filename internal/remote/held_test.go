@@ -24,6 +24,49 @@ func fakeSSH(t *testing.T) Target {
 	return Target{SSH: p, Dest: "test"}
 }
 
+// A shared connection that is up but dead: the probe through it gets no
+// answer within MasterWait; the shared connection is ended and the probe
+// runs on a new one.
+func TestDeadMaster(t *testing.T) {
+	tg := fakeSSH(t)
+	dir := t.TempDir()
+	// "-O check" says the master is up; until "-O exit", commands hang.
+	script := `#!/bin/sh
+for a; do last=$a; case $a in check) exit 0 ;; exit) touch "` + dir + `/exited"; exit 0 ;; esac; done
+# like ssh, which hands its stdout to the shared connection's process
+[ -e "` + dir + `/exited" ] || { sleep 30 & exec sleep 30; }
+exec sh -c "$last"
+`
+	if err := os.WriteFile(tg.SSH, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := controlPathName(tg)
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	os.WriteFile(p, nil, 0o600) // the socket
+	c, err := Open(tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if !c.masterUp {
+		t.Fatal("the shared connection was not seen")
+	}
+	defer func(w time.Duration) { MasterWait = w }(MasterWait)
+	MasterWait = 300 * time.Millisecond
+	start := time.Now()
+	f, h, err := c.FactsHeld("echo a=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if f["a"] != "1" || time.Since(start) > 5*time.Second {
+		t.Fatalf("facts %v after %v", f, time.Since(start))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "exited")); err != nil {
+		t.Fatal("the shared connection was not ended")
+	}
+}
+
 // The probe's ssh session waits after the facts and runs the next script
 // with the rest of stdin as its own.
 func TestFactsHeld(t *testing.T) {
