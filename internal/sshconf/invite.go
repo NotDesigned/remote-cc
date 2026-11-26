@@ -51,11 +51,11 @@ func DecodeInvite(s string) (*Invite, error) {
 	if err := json.Unmarshal(b, &iv); err != nil || iv.V != 1 || iv.Host == "" || iv.Key == "" {
 		return nil, errors.New("damaged or unsupported invite")
 	}
-	if err := ValidUser(iv.User); err != nil {
-		return nil, err
-	}
 	if iv.Port == 0 {
 		iv.Port = 2222
+	}
+	if err := iv.Check(); err != nil {
+		return nil, fmt.Errorf("damaged or forged invite: %w", err)
 	}
 	return &iv, nil
 }
@@ -77,23 +77,24 @@ func Join(text, alias string) (Server, error) {
 		return Server{}, fmt.Errorf("invalid alias %q", alias)
 	}
 	s := Server{Alias: alias, Host: iv.Host, Port: iv.Port, User: iv.User}
+	if err := s.validate(); err != nil {
+		return s, err
+	}
 	pub, err := EnsureKey(alias)
 	if err != nil {
 		return s, err
 	}
-	sshDir, d, err := dirs()
+	_, d, err := dirs()
 	if err != nil {
 		return s, err
 	}
-	kh := filepath.Join(sshDir, "known_hosts")
-	for _, l := range []string{s.gwKnownName() + " " + iv.GwKey, s.containerKnownName() + " " + iv.UserKey} {
-		if strings.Count(l, " ") < 2 {
-			return s, errors.New("invite lacks host keys")
-		}
-		if err := appendLine(kh, l); err != nil {
-			return s, err
-		}
+	// Enrolling trusts only the invite's host keys, in a known_hosts file of
+	// its own; ~/.ssh/known_hosts changes only once enrolled (Configure).
+	kh := filepath.Join(d, ".invite-"+iv.ID+".known_hosts")
+	if err := os.WriteFile(kh, []byte(s.gwKnownName()+" "+iv.GwKey+"\n"+s.containerKnownName()+" "+iv.UserKey+"\n"), 0o600); err != nil {
+		return s, err
 	}
+	defer os.Remove(kh)
 
 	// Enroll through a private config that uses only the one-time key.
 	tmpKey := filepath.Join(d, ".invite-"+iv.ID)
@@ -142,10 +143,15 @@ Host target
 	return s, nil
 }
 
-// PrintInvite shows an invite (stdout) with instructions (stderr).
-func PrintInvite(iv Invite, who, prog string) {
+// PrintInvite checks an invite (as device join will) and shows it (stdout)
+// with instructions (stderr).
+func PrintInvite(iv Invite, who, prog string) error {
+	if err := iv.Check(); err != nil {
+		return fmt.Errorf("the server's answer makes no usable invite: %w", err)
+	}
 	fmt.Fprintf(os.Stderr, "\nOne-time invite for %s on %s (valid until %s server time). Send it privately:\n"+
 		"whoever holds it can add one device for %s until it is used or expires.\n\n", who, iv.Host, iv.Expires, iv.User)
 	fmt.Println(iv.Encode())
 	fmt.Fprintf(os.Stderr, "\nOn the new machine (after installing remote-cc):\n  %s device join <invite>\n", prog)
+	return nil
 }

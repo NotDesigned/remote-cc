@@ -66,8 +66,7 @@ func DeviceInvite(alias string, ttl time.Duration) error {
 	}
 	iv := sshconf.Invite{V: 1, Host: srv.Host, Port: srv.Port, User: srv.User, Alias: alias, GwKey: gwKey,
 		UserKey: cf["ukey"], ID: id, Key: string(priv), Expires: gf["exp"]}
-	sshconf.PrintInvite(iv, "another machine of "+srv.User, remote.Prog)
-	return nil
+	return sshconf.PrintInvite(iv, "another machine of "+srv.User, remote.Prog)
 }
 
 type keyLine struct {
@@ -193,6 +192,12 @@ func DeviceRemove(alias, which string, force bool) error {
 	}
 	for _, k := range drop {
 		fmt.Printf("removed %s %s\n", dash(k.comment), k.fp)
+		if k.mine {
+			// The shared connection authenticated with this key: end it,
+			// or access would last as long as it does.
+			remote.StopMaster(remote.Target{Dest: alias})
+			remote.StopMaster(remote.Target{Dest: alias + "-gw"})
+		}
 	}
 	return nil
 }

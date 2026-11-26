@@ -224,8 +224,7 @@ func invite(conn *remote.Conn, c Config, name, alias string, ttl time.Duration) 
 	port, _ := strconv.Atoi(f["port"])
 	iv := sshconf.Invite{V: 1, Host: host, Port: port, User: name, Alias: alias, GwKey: f["gwkey"], UserKey: f["ukey"],
 		ID: id, Key: string(priv), Expires: f["exp"]}
-	sshconf.PrintInvite(iv, name, remote.Prog)
-	return nil
+	return sshconf.PrintInvite(iv, name, remote.Prog)
 }
 
 // UserConfig prints the ssh config a user with their own key would use.
@@ -422,6 +421,20 @@ func Remove(c Config, purge bool) error {
 	if f["port"] != "" && f["port"] != "22" {
 		name = "[" + host + "]:" + f["port"]
 	}
+	// The HOSTs on this machine for this server: their config entries and
+	// pinned host keys (gateway and containers) would only mislead now.
+	port, _ := strconv.Atoi(f["port"])
+	if port == 0 {
+		port = 22
+	}
+	gone, err := sshconf.Forget(host, port)
+	if len(gone) > 0 {
+		fmt.Fprintf(os.Stderr, "rcc: removed %s from ~/.ssh/remote-cc/config and their host keys from your known_hosts\n", strings.Join(gone, ", "))
+	}
+	if err != nil {
+		return fmt.Errorf("server removed, but cleaning up this machine's ssh files failed: %w", err)
+	}
+	// Also a hashed entry ssh-keygen -H made of the gateway's name.
 	if exec.Command("ssh-keygen", "-R", name).Run() == nil {
 		fmt.Fprintf(os.Stderr, "rcc: removed %s from your known_hosts\n", name)
 	}

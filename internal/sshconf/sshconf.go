@@ -10,21 +10,26 @@ package sshconf
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+
+	"remote-cc/internal/atomicfile"
+	"remote-cc/internal/remote"
 )
 
 var (
@@ -171,17 +176,27 @@ func Fingerprint(line string) string {
 
 // Configure pins both host keys and writes the alias entries for s.
 func Configure(s Server, gwKey, containerKey string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	gwKey, err := HostKey(gwKey)
+	if err != nil {
+		return fmt.Errorf("the gateway's host key: %w", err)
+	}
+	containerKey, err = HostKey(containerKey)
+	if err != nil {
+		return fmt.Errorf("the container's host key: %w", err)
+	}
 	sshDir, d, err := dirs()
 	if err != nil {
 		return err
 	}
-	for _, l := range []string{s.gwKnownName() + " " + gwKey, s.containerKnownName() + " " + containerKey} {
-		if strings.Count(l, " ") < 2 {
-			return errors.New("missing host keys")
-		}
-		if err := appendLine(filepath.Join(sshDir, "known_hosts"), l); err != nil {
-			return err
-		}
+	kh := filepath.Join(sshDir, "known_hosts")
+	if err := pinHostKey(kh, s.gwKnownName(), gwKey); err != nil {
+		return err
+	}
+	if err := pinHostKey(kh, s.containerKnownName(), containerKey); err != nil {
+		return err
 	}
 	gwHost, jump := s.Host, ""
 	if s.Jump != "" {
@@ -209,6 +224,7 @@ Host %[1]s
 	if err := upsertBlock(filepath.Join(d, "config"), s.Alias, block); err != nil {
 		return err
 	}
+	stopMasters(s.Alias)
 	return ensureInclude(filepath.Join(sshDir, "config"))
 }
 
@@ -305,41 +321,130 @@ func blockRe(alias string) *regexp.Regexp {
 	return regexp.MustCompile(`(?ms)^# remote-cc:` + q + ` begin\n.*?^# remote-cc:` + q + ` end\n`)
 }
 
-func appendLine(path, line string) error {
-	if b, err := os.ReadFile(path); err == nil && bytes.Contains(b, []byte(line)) {
+// pinHostKey makes key the only trusted host key for name in the
+// known_hosts file at path: earlier entries for exactly that name (plain or
+// hashed) are dropped, so a server's old key is not trusted after a new one
+// was pinned. Entries naming other hosts too, and @-marker lines, are kept.
+func pinHostKey(path, name, key string) error {
+	return atomicfile.Update(path, 0o600, func(old []byte) ([]byte, error) {
+		b := dropKnownHosts(old, name)
+		return append(b, name+" "+key+"\n"...), nil
+	})
+}
+
+// forgetHostKeys drops the known_hosts entries for exactly these names.
+func forgetHostKeys(path string, names ...string) error {
+	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
+	return atomicfile.Update(path, 0o600, func(old []byte) ([]byte, error) {
+		return dropKnownHosts(old, names...), nil
+	})
+}
+
+func dropKnownHosts(old []byte, names ...string) []byte {
+	var out bytes.Buffer
+	for _, l := range strings.SplitAfter(string(old), "\n") {
+		if l == "" {
+			continue
+		}
+		if f := strings.Fields(l); len(f) >= 2 && slices.ContainsFunc(names, func(n string) bool { return knownHostIs(f[0], n) }) {
+			continue
+		}
+		out.WriteString(l)
+		if !strings.HasSuffix(l, "\n") {
+			out.WriteByte('\n')
+		}
 	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, line)
-	return err
+	return out.Bytes()
+}
+
+// knownHostIs reports whether a known_hosts host field names exactly name,
+// as written or hashed (|1|salt|hash, see ssh-keygen -H).
+func knownHostIs(field, name string) bool {
+	if field == name {
+		return true
+	}
+	p := strings.Split(field, "|")
+	if len(p) != 4 || p[0] != "" || p[1] != "1" {
+		return false
+	}
+	salt, err1 := base64.StdEncoding.DecodeString(p[2])
+	sum, err2 := base64.StdEncoding.DecodeString(p[3])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	m := hmac.New(sha1.New, salt)
+	m.Write([]byte(name))
+	return hmac.Equal(m.Sum(nil), sum)
 }
 
 func upsertBlock(path, alias, block string) error {
-	old, _ := os.ReadFile(path)
-	re := blockRe(alias)
-	var s string
-	if re.Match(old) {
-		s = re.ReplaceAllLiteralString(string(old), block)
-	} else {
-		s = string(old)
+	return atomicfile.Update(path, 0o600, func(old []byte) ([]byte, error) {
+		re := blockRe(alias)
+		if re.Match(old) {
+			return []byte(re.ReplaceAllLiteralString(string(old), block)), nil
+		}
+		s := string(old)
 		if s != "" && !strings.HasSuffix(s, "\n") {
 			s += "\n"
 		}
-		s += block
-	}
-	return os.WriteFile(path, []byte(s), 0o600)
+		return []byte(s + block), nil
+	})
 }
+
+// removeBlock drops alias's entries from the config file at path.
+func removeBlock(path, alias string) error {
+	return atomicfile.Update(path, 0o600, func(old []byte) ([]byte, error) {
+		return blockRe(alias).ReplaceAll(old, nil), nil
+	})
+}
+
+var includeRe = regexp.MustCompile(`(?mi)^\s*Include\s+.*remote-cc[/\\]config`)
 
 // ensureInclude puts "Include remote-cc/config" first in ~/.ssh/config
 // (before any Host block, so it applies globally).
 func ensureInclude(path string) error {
-	old, _ := os.ReadFile(path)
-	if regexp.MustCompile(`(?mi)^\s*Include\s+.*remote-cc[/\\]config`).Match(old) {
+	if old, err := os.ReadFile(path); err == nil && includeRe.Match(old) {
 		return nil
 	}
-	return os.WriteFile(path, append([]byte("Include remote-cc/config\n\n"), old...), 0o600)
+	return atomicfile.Update(path, 0o600, func(old []byte) ([]byte, error) {
+		if includeRe.Match(old) {
+			return old, nil
+		}
+		return append([]byte("Include remote-cc/config\n\n"), old...), nil
+	})
+}
+
+// Forget removes what Configure wrote for every HOST on this machine that
+// reaches the server at host:port (its config entries and both pinned host
+// keys) and returns their aliases. For `server remove`.
+func Forget(host string, port int) ([]string, error) {
+	sshDir, d, err := dirs()
+	if err != nil {
+		return nil, err
+	}
+	var gone []string
+	for _, s := range Hosts() {
+		if s.Host != host || s.Port != port {
+			continue
+		}
+		if err := removeBlock(filepath.Join(d, "config"), s.Alias); err != nil {
+			return gone, err
+		}
+		if err := forgetHostKeys(filepath.Join(sshDir, "known_hosts"), s.containerKnownName(), s.gwKnownName()); err != nil {
+			return gone, err
+		}
+		stopMasters(s.Alias)
+		gone = append(gone, s.Alias)
+	}
+	return gone, nil
+}
+
+// stopMasters ends shared ssh connections (see internal/remote) to alias
+// and its gateway: one made before the alias was re-configured or a key
+// removed would go on using the old settings and the old authentication.
+func stopMasters(alias string) {
+	remote.StopMaster(remote.Target{Dest: alias})
+	remote.StopMaster(remote.Target{Dest: alias + "-gw"})
 }

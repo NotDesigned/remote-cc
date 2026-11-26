@@ -73,25 +73,59 @@ const MasterPersist = 10 * time.Minute
 // directory under the user cache. A socket left by a master that died is
 // removed first: ssh would otherwise not multiplex at all.
 func controlPath(t Target) string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
+	p := controlPathName(t)
+	if p == "" {
 		return ""
 	}
-	dir = filepath.Join(dir, "rcc", "cm")
+	dir := filepath.Dir(p)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return ""
 	}
 	os.Chmod(dir, 0o700)
-	sum := sha256.Sum256([]byte(strings.Join(append([]string{t.SSH, t.Dest}, t.Args...), "\x00")))
-	p := filepath.Join(dir, hex.EncodeToString(sum[:8]))
-	if len(p) > 100 { // unix socket paths are limited to 104-108 bytes
-		return ""
-	}
 	if _, err := os.Stat(p); err == nil {
 		args := append(append([]string{}, t.Args...), "-o", "ControlPath="+p, "-O", "check", t.Dest)
 		if exec.Command(t.SSH, args...).Run() != nil {
 			os.Remove(p)
 		}
+	}
+	return p
+}
+
+// StopMaster ends the shared connection to t, if one is up. A connection
+// made before t's ssh config changed (device join again, server setup) or
+// before its key was removed (device remove) would otherwise go on being
+// used, with the old settings and the old authentication, for up to
+// MasterPersist.
+func StopMaster(t Target) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if t.SSH == "" {
+		t.SSH = "ssh"
+	}
+	p := controlPathName(t)
+	if p == "" {
+		return
+	}
+	if _, err := os.Stat(p); err != nil {
+		return
+	}
+	args := append(append([]string{}, t.Args...), "-o", "ControlPath="+p, "-O", "exit", t.Dest)
+	exec.Command(t.SSH, args...).Run()
+	os.Remove(p)
+}
+
+// controlPathName is where t's shared connection's socket goes ("" if no
+// usable path).
+func controlPathName(t Target) string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.Join(append([]string{t.SSH, t.Dest}, t.Args...), "\x00")))
+	p := filepath.Join(dir, "rcc", "cm", hex.EncodeToString(sum[:8]))
+	if len(p) > 100 { // unix socket paths are limited to 104-108 bytes
+		return ""
 	}
 	return p
 }
