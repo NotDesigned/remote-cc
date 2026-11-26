@@ -374,7 +374,9 @@ func reconnect(cfg ClientConfig, link *resume.Conn, status *statusLine, abort, h
 	giveUp := start.Add(cfg.Grace + time.Minute)
 	const hint = " … (typing is kept; Ctrl-C ends the session)"
 	status.begin(statusShowAfter)
-	status.set("connection lost; reconnecting" + hint)
+	if pending == nil {
+		status.set("connection lost; reconnecting" + hint)
+	} // else the status (if shown) still tells of the attempt under way
 	gaveUp := func() (<-chan struct{}, error) {
 		status.final("gave up reconnecting")
 		return nil, fmt.Errorf("gave up reconnecting; the session on the server ends by itself within %v", cfg.Grace)
