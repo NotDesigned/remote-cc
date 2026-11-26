@@ -72,12 +72,16 @@ func TestNormalizeURL(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://b.example.com/":    "https://b.example.com",
 		" https://b.example.com/x/": "https://b.example.com/x",
+		"http://localhost:8080/":    "http://localhost:8080",
+		"http://127.0.0.2:8080":     "http://127.0.0.2:8080",
+		"http://[::1]:8080":         "http://[::1]:8080",
 	} {
 		if got, err := NormalizeURL(in); err != nil || got != want {
 			t.Errorf("%q -> %q %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"b.example.com", "ftp://x", ""} {
+	// The token must not travel in the clear.
+	for _, bad := range []string{"b.example.com", "ftp://x", "", "http://b.example.com", "http://10.0.0.1:8080", "http://localhost.evil.com"} {
 		if _, err := NormalizeURL(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

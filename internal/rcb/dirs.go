@@ -1,11 +1,14 @@
 package rcb
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
+	"remote-cc/internal/atomicfile"
 	"remote-cc/internal/sshconf"
 )
 
@@ -28,41 +31,61 @@ func loadDirs() (map[string]Use, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := map[string]Use{}
 	b, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
-		return m, nil
+		return map[string]Use{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal(b, &m)
+	return parseDirs(p, b)
+}
+
+// parseDirs reads rcb-dirs.json. A damaged file is an error, never an
+// empty list that the next Remember would write over.
+func parseDirs(p string, b []byte) (map[string]Use, error) {
+	m := map[string]Use{}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return m, nil
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("%s is damaged (%v); fix or delete it", p, err)
+	}
 	return m, nil
 }
 
-// Remember stores u for dir (an absolute path).
+// Remember stores u for dir (an absolute path). A damaged file is kept as a
+// copy (named in the error) and not replaced.
 func Remember(dir string, u Use) error {
-	m, err := loadDirs()
+	p, err := dirsPath()
 	if err != nil {
 		return err
 	}
-	m[filepath.Clean(dir)] = u
-	p, _ := dirsPath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(m, "", "  ")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return atomicfile.Update(p, 0o600, func(old []byte) ([]byte, error) {
+		m, err := parseDirs(p, old)
+		if err != nil {
+			if c, cerr := atomicfile.KeepDamaged(p, old); cerr == nil {
+				err = fmt.Errorf("%w (a copy is in %s)", err, c)
+			}
+			return nil, err
+		}
+		m[filepath.Clean(dir)] = u
+		b, _ := json.MarshalIndent(m, "", "  ")
+		return append(b, '\n'), nil
+	})
 }
 
 // Lookup finds what was remembered for dir or its nearest parent, and that directory.
 func Lookup(dir string) (Use, string, bool) {
 	m, err := loadDirs()
-	if err != nil || len(m) == 0 {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rcc: warning: %v\n", err)
+		return Use{}, "", false
+	}
+	if len(m) == 0 {
 		return Use{}, "", false
 	}
 	d := filepath.Clean(dir)

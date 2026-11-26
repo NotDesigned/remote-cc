@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"remote-cc/internal/atomicfile"
 )
 
 // Link is what `rcb login` stores on this machine.
@@ -100,6 +103,9 @@ func Load() (Link, error) {
 	if err := json.Unmarshal(b, &l); err != nil || l.URL == "" || l.Token == "" {
 		return Link{}, fmt.Errorf("%s is damaged; run rcb login again", p)
 	}
+	if _, err := NormalizeURL(l.URL); err != nil {
+		return Link{}, fmt.Errorf("%v; run rcb login again with the https:// address", err)
+	}
 	return l, nil
 }
 
@@ -113,11 +119,12 @@ func Save(l Link) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(l, "", "  ")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+	unlock, err := atomicfile.Lock(p)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	defer unlock()
+	return atomicfile.Write(p, append(b, '\n'), 0o600)
 }
 
 // Remove deletes the stored link.
@@ -138,11 +145,34 @@ func NormalizeURL(s string) (string, error) {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return "", errors.New("give the remote-claude-browser address, e.g. https://browser.example.com")
 	}
+	if u.Scheme == "http" && !loopback(u.Hostname()) {
+		return "", fmt.Errorf("%s: plain http would send your remote-claude-browser token unencrypted; use https:// (http:// is accepted only for localhost)", u.Redacted())
+	}
 	u.Path, u.RawQuery, u.Fragment = strings.TrimRight(u.Path, "/"), "", ""
 	return u.String(), nil
 }
 
-var client = &http.Client{Timeout: 20 * time.Second}
+// loopback reports whether host is this machine (localhost, 127.0.0.0/8, ::1).
+func loopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+var client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: noDowngrade}
+
+// noDowngrade refuses a redirect that would carry the token over plain http.
+func noDowngrade(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.Scheme != "https" && !loopback(req.URL.Hostname()) {
+		return fmt.Errorf("refusing a redirect to %s: plain http would send the token unencrypted", req.URL.Redacted())
+	}
+	return nil
+}
 
 // Profiles lists the profiles the link's user owns.
 func Profiles(l Link) ([]Profile, error) {

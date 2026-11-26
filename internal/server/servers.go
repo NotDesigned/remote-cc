@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"remote-cc/internal/atomicfile"
 	"remote-cc/internal/remote"
 )
 
@@ -59,21 +60,35 @@ func saveKnown(ks []Known) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(ks, "", "  ")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+	return atomicfile.Write(p, append(b, '\n'), 0o600)
+}
+
+// updateKnown changes the remembered servers under a lock, so two admin
+// commands at once never lose each other's change.
+func updateKnown(fn func([]Known) []Known) error {
+	p, err := knownPath()
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	unlock, err := atomicfile.Lock(p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	ks, err := KnownServers()
+	if err != nil {
+		return err
+	}
+	return saveKnown(fn(ks))
 }
 
 // remember records c as a known server (best effort: a failure only warns).
 func remember(c Config) {
 	k := Known{Dest: c.Dest, Args: c.Args, InstallDir: c.InstallDir}
-	ks, err := KnownServers()
-	if err == nil {
+	err := updateKnown(func(ks []Known) []Known {
 		ks = slices.DeleteFunc(ks, func(x Known) bool { return x.key() == k.key() })
-		err = saveKnown(append(ks, k))
-	}
+		return append(ks, k)
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rcc: warning: could not remember this server for server update --all: %v\n", err)
 	}
@@ -82,18 +97,16 @@ func remember(c Config) {
 // Forget drops remembered servers whose destination is dest (and install
 // dir, if given). It reports how many were dropped.
 func Forget(dest, installDir string) (int, error) {
-	ks, err := KnownServers()
-	if err != nil {
-		return 0, err
-	}
-	n := len(ks)
-	ks = slices.DeleteFunc(ks, func(x Known) bool {
-		return x.Dest == dest && (installDir == "" || x.InstallDir == installDir)
+	dropped := 0
+	err := updateKnown(func(ks []Known) []Known {
+		n := len(ks)
+		ks = slices.DeleteFunc(ks, func(x Known) bool {
+			return x.Dest == dest && (installDir == "" || x.InstallDir == installDir)
+		})
+		dropped = n - len(ks)
+		return ks
 	})
-	if len(ks) == n {
-		return 0, nil
-	}
-	return n - len(ks), saveKnown(ks)
+	return dropped, err
 }
 
 // ListKnown prints the remembered servers.

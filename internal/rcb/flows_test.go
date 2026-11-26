@@ -76,6 +76,40 @@ func TestRememberLookup(t *testing.T) {
 	}
 }
 
+func TestRememberKeepsDamagedFileAndSerializes(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("HOME", cfg)
+	p := filepath.Join(cfg, "rcc", "rcb-dirs.json")
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	os.WriteFile(p, []byte(`{"/a": {"profile": "p-1"`), 0o600)
+	err := Remember(filepath.Join(cfg, "b"), Use{Profile: "p-2"})
+	if err == nil || !strings.Contains(err.Error(), "damaged") {
+		t.Fatalf("damaged file overwritten: %v", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{"/a": {"profile": "p-1"` {
+		t.Fatalf("damaged file changed: %q", b)
+	}
+	if copies, _ := filepath.Glob(p + ".damaged-*"); len(copies) != 1 {
+		t.Fatalf("no copy kept: %v", copies)
+	}
+	os.Remove(p)
+	done := make(chan error)
+	for i := range 10 {
+		go func() { done <- Remember(filepath.Join(cfg, "d", string(rune('a'+i))), Use{Profile: "p"}) }()
+	}
+	for range 10 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var m map[string]Use
+	b, _ := os.ReadFile(p)
+	if err := json.Unmarshal(b, &m); err != nil || len(m) != 10 {
+		t.Fatalf("lost updates: %d of 10 (%v)", len(m), err)
+	}
+}
+
 func TestServers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
