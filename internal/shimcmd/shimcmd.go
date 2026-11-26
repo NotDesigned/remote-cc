@@ -15,13 +15,17 @@ import (
 // Main runs rcc-shim with os.Args-style arguments and returns the exit code.
 //
 //	git ARGS…                  as bin/git: Claude Code's own git calls (shim.Git)
+//	rg ARGS…                   as rg/rg: Claude Code's searches (shim.Rg)
 //	__rcc-netexec …            --rcb: run inside the profile's node namespace
 //	__rcc-daemon RUN           start the session daemon (internal/session)
 //	__rcc-dial SOCKET          connect ssh's stdio to the session daemon
 //	COMMAND                    run one command on the computer (CLAUDE_CODE_SHELL_PREFIX)
 func Main(args []string) int {
-	if filepath.Base(args[0]) == "git" {
+	switch filepath.Base(args[0]) {
+	case "git":
 		return shim.Git(args[1:])
+	case "rg":
+		return shim.Rg(args[1:])
 	}
 	rest := args[1:]
 	if netexec.Is(rest) {
